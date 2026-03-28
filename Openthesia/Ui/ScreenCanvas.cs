@@ -40,6 +40,31 @@ public class ScreenCanvas
     private static bool _isProgressBarHovered;
     private static float _panVelocity;
     private static bool _isProgressBarActive;
+    private static readonly Dictionary<int, HitLineGlowState> _hitLineGlows = new();
+    private static readonly List<int> _hitLineGlowKeys = new();
+    private static readonly List<int> _hitLineGlowsToRemove = new();
+    private static readonly List<HitLineParticle> _hitLineParticles = new();
+    private static uint _hitLineParticleRng = 0x6E624EB7;
+
+    private struct HitLineGlowState
+    {
+        public float X1;
+        public float X2;
+        public Vector4 Color;
+        public float Intensity;
+        public float VerticalScale;
+        public float ParticleCarry;
+    }
+
+    private struct HitLineParticle
+    {
+        public Vector2 Position;
+        public Vector2 Velocity;
+        public Vector4 Color;
+        public float Life;
+        public float MaxLife;
+        public float Size;
+    }
 
     private static void RenderGrid()
     {
@@ -138,6 +163,225 @@ public class ScreenCanvas
         textSize = baseTextSize * realScale;
 
         return true;
+    }
+
+    private static float NextHitLineRandom()
+    {
+        _hitLineParticleRng ^= _hitLineParticleRng << 13;
+        _hitLineParticleRng ^= _hitLineParticleRng >> 17;
+        _hitLineParticleRng ^= _hitLineParticleRng << 5;
+        return (_hitLineParticleRng & 0x00FFFFFF) / 16777216f;
+    }
+
+    private static void DrawHitLineConsumeEffect(ImDrawListPtr drawList, float x1, float x2, Vector4 color, float intensity, float verticalScale)
+    {
+        float lineY = PianoRenderer.P.Y - 1f;
+        Vector3 rgb = new(color.X, color.Y, color.Z);
+        float width = MathF.Max(6f, x2 - x1);
+        float time = (float)ImGui.GetTime();
+        float pulse = 0.9f + 0.1f * MathF.Sin(time * 8f + (x1 + x2) * 0.05f);
+        float energy = Math.Clamp(intensity * pulse, 0.08f, 2.1f);
+        float riseScale = Math.Clamp(verticalScale, 0.3f, 1f);
+        float roundnessBase = Math.Clamp(width * 0.28f, 2f, 6f);
+        Vector3 hot = Vector3.Lerp(rgb, Vector3.One, 0.34f);
+
+        // Keep horizontal spread very close to key width.
+        float corePadX = Math.Clamp(width * 0.012f, 0f, 0.24f);
+        float auraPadX = corePadX + Math.Clamp(width * 0.008f, 0.04f, 0.2f);
+
+        // Strong upward bloom while keeping only a thin tail below the line.
+        float upReach = (10f + 28f * energy) * riseScale;
+        float coreDown = 0.9f + 0.45f * energy;
+        float auraUp = upReach + (7f + 6f * energy) * riseScale;
+        float auraDown = 1.7f + 0.7f * energy;
+
+        drawList.AddRectFilledMultiColor(
+            new Vector2(x1 - auraPadX, lineY - auraUp),
+            new Vector2(x2 + auraPadX, lineY + auraDown),
+            ImGui.GetColorU32(new Vector4(rgb, 0f)),
+            ImGui.GetColorU32(new Vector4(rgb, 0f)),
+            ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.28f * energy, 0.1f, 0.5f))),
+            ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.28f * energy, 0.1f, 0.5f))));
+
+        drawList.AddRectFilledMultiColor(
+            new Vector2(x1 - corePadX, lineY - upReach),
+            new Vector2(x2 + corePadX, lineY + coreDown),
+            ImGui.GetColorU32(new Vector4(hot, 0f)),
+            ImGui.GetColorU32(new Vector4(hot, 0f)),
+            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.92f * energy, 0.2f, 1f))),
+            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.92f * energy, 0.2f, 1f))));
+
+        float flashHalfHeight = 1.6f + 1.1f * energy;
+        drawList.AddRectFilled(
+            new Vector2(x1 - corePadX, lineY - flashHalfHeight),
+            new Vector2(x2 + corePadX, lineY + flashHalfHeight),
+            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.74f * energy, 0.2f, 0.95f))),
+            roundnessBase + 1.2f,
+            ImDrawFlags.RoundCornersAll);
+
+        float coreThickness = 2.1f + energy * 2f;
+        drawList.AddLine(
+            new Vector2(x1 - corePadX, lineY),
+            new Vector2(x2 + corePadX, lineY),
+            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(1.05f * energy, 0.35f, 1f))),
+            coreThickness);
+
+        // Keep only one core stroke to avoid "double glow" look on the hit line.
+    }
+
+    private static void SpawnHitLineParticles(float x1, float x2, Vector4 noteColor, int spawnCount, float edgeBurst, float intensity)
+    {
+        if (spawnCount <= 0)
+            return;
+
+        int maxParticles = 760;
+        int available = maxParticles - _hitLineParticles.Count;
+        if (available <= 0)
+            return;
+
+        spawnCount = Math.Min(spawnCount, available);
+        float width = MathF.Max(6f, x2 - x1);
+        float lineY = PianoRenderer.P.Y - 1f;
+        Vector4 particleColor = Vector4.Lerp(noteColor, Vector4.One, 0.72f);
+
+        for (int i = 0; i < spawnCount; i++)
+        {
+            float t = NextHitLineRandom();
+            float speedUp = 92f + 150f * NextHitLineRandom() + intensity * 34f + edgeBurst * 30f;
+            float speedSide = (NextHitLineRandom() - 0.5f) * (54f + width * 0.5f);
+            float life = 0.2f + 0.16f * NextHitLineRandom() + edgeBurst * 0.1f;
+            float size = 1.2f + 1.7f * NextHitLineRandom() + edgeBurst * 0.45f;
+
+            _hitLineParticles.Add(new HitLineParticle
+            {
+                Position = new Vector2(Lerp(x1, x2, t), lineY + 0.5f),
+                Velocity = new Vector2(speedSide, -speedUp),
+                Color = particleColor,
+                Life = life,
+                MaxLife = life,
+                Size = size
+            });
+        }
+    }
+
+    private static void DrawHitLineTransientEffects(ImDrawListPtr drawList)
+    {
+        float dt = Math.Clamp(ImGui.GetIO().DeltaTime, 0.001f, 0.05f);
+        float playbackSpeed = MidiPlayer.Playback is null ? 1f : (float)MidiPlayer.Playback.Speed;
+        playbackSpeed = Math.Clamp(playbackSpeed, 0.25f, 4f);
+        float speedScale = playbackSpeed;
+        float glowDecay = MathF.Exp(-dt * (8.2f + 3.4f * speedScale));
+
+        _hitLineGlowKeys.Clear();
+        foreach (var key in _hitLineGlows.Keys)
+        {
+            _hitLineGlowKeys.Add(key);
+        }
+
+        _hitLineGlowsToRemove.Clear();
+        foreach (int key in _hitLineGlowKeys)
+        {
+            if (!_hitLineGlows.TryGetValue(key, out var glow))
+                continue;
+
+            glow.Intensity *= glowDecay;
+            if (glow.Intensity < 0.11f)
+            {
+                _hitLineGlowsToRemove.Add(key);
+                continue;
+            }
+
+            _hitLineGlows[key] = glow;
+            DrawHitLineConsumeEffect(drawList, glow.X1, glow.X2, glow.Color, glow.Intensity, glow.VerticalScale);
+        }
+
+        foreach (int key in _hitLineGlowsToRemove)
+        {
+            _hitLineGlows.Remove(key);
+        }
+
+        float particleDrag = MathF.Exp(-dt * (3.9f + 1.2f * speedScale));
+        float particleLifeStep = dt * (1.05f + 0.55f * speedScale);
+        for (int i = _hitLineParticles.Count - 1; i >= 0; i--)
+        {
+            HitLineParticle particle = _hitLineParticles[i];
+            particle.Life -= particleLifeStep;
+            if (particle.Life <= 0f)
+            {
+                _hitLineParticles.RemoveAt(i);
+                continue;
+            }
+
+            particle.Position += particle.Velocity * dt;
+            particle.Velocity *= particleDrag;
+            float life01 = particle.Life / particle.MaxLife;
+            float alpha = MathF.Pow(life01, 1.2f) * 1.35f;
+            float size = particle.Size * (0.65f + life01 * 1.05f);
+            Vector4 color = new Vector4(particle.Color.X, particle.Color.Y, particle.Color.Z, alpha);
+
+            drawList.AddCircleFilled(particle.Position, size, ImGui.GetColorU32(color));
+            drawList.AddLine(
+                particle.Position,
+                particle.Position - particle.Velocity * (0.012f + 0.008f * life01),
+                ImGui.GetColorU32(new Vector4(color.X, color.Y, color.Z, alpha)),
+                1.35f);
+
+            _hitLineParticles[i] = particle;
+        }
+    }
+
+    private static void RegisterHitLineNoteEffect(int noteId, float py1, float py2, float x1, float x2, Vector4 noteColor)
+    {
+        bool intersectsHitLine = py1 <= PianoRenderer.P.Y && py2 >= PianoRenderer.P.Y - 0.5f;
+        if (!intersectsHitLine)
+            return;
+
+        float dt = Math.Clamp(ImGui.GetIO().DeltaTime, 0.001f, 0.05f);
+        float lineY = PianoRenderer.P.Y;
+        float edgeDistance = MathF.Min(MathF.Abs(py2 - lineY), MathF.Abs(py1 - lineY));
+        float edgeBurst = MathF.Exp(-edgeDistance / 8f);
+        float sustain = 0.05f;
+        float targetIntensity = Math.Clamp(sustain + edgeBurst * 1.45f, 0.2f, 1.7f);
+        float noteVisualHeight = MathF.Max(2f, py2 - py1);
+        float targetVerticalScale = Math.Clamp((noteVisualHeight - 6f) / 72f, 0.3f, 1f);
+
+        if (_hitLineGlows.TryGetValue(noteId, out var glow))
+        {
+            glow.X1 = Lerp(glow.X1, x1, 0.45f);
+            glow.X2 = Lerp(glow.X2, x2, 0.45f);
+            glow.Color = Vector4.Lerp(glow.Color, noteColor, 0.26f);
+            glow.Intensity = MathF.Max(glow.Intensity * 0.84f + targetIntensity * 0.55f, targetIntensity);
+            glow.VerticalScale = MathF.Max(glow.VerticalScale * 0.82f + targetVerticalScale * 0.48f, targetVerticalScale);
+
+            float width = MathF.Max(6f, x2 - x1);
+            float emitRate = (34f + width * 0.42f) * (0.68f + targetIntensity * 1.14f);
+            if (edgeBurst > 0.55f)
+                emitRate += 54f * edgeBurst;
+            glow.ParticleCarry += emitRate * dt;
+            int spawnCount = Math.Min(24, (int)glow.ParticleCarry);
+            glow.ParticleCarry -= spawnCount;
+            _hitLineGlows[noteId] = glow;
+            SpawnHitLineParticles(x1, x2, noteColor, spawnCount, edgeBurst, targetIntensity);
+        }
+        else
+        {
+            float width = MathF.Max(6f, x2 - x1);
+            float emitRate = (34f + width * 0.42f) * (0.68f + targetIntensity * 1.14f);
+            float carry = emitRate * dt;
+            int spawnCount = Math.Min(24, Math.Max(1, (int)carry));
+            carry = MathF.Max(0f, carry - spawnCount);
+
+            _hitLineGlows[noteId] = new HitLineGlowState
+            {
+                X1 = x1,
+                X2 = x2,
+                Color = noteColor,
+                Intensity = targetIntensity * 0.9f,
+                VerticalScale = targetVerticalScale,
+                ParticleCarry = carry
+            };
+            SpawnHitLineParticles(x1, x2, noteColor, spawnCount, edgeBurst, targetIntensity);
+        }
     }
 
     private static void ApplyMasterVolume(float volume)
@@ -492,6 +736,9 @@ public class ScreenCanvas
 
             if (note.NoteName.ToString().EndsWith("Sharp"))
             {
+                float x1 = PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4;
+                float x2 = PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4;
+
                 if (CoreSettings.NeonFx)
                 {
                     for (int i = 0; i < 3; i++)
@@ -500,8 +747,8 @@ public class ScreenCanvas
                         float alpha = 0.2f + (3 - i) * 0.2f;
                         uint color = ImGui.GetColorU32(new Vector4(col.X, col.Y, col.Z, alpha) * 0.5f * 0.7f);
                         drawList.AddRect(
-                            new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4 - 1, py1 - 1),
-                            new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4 + 1, py2 + 1),
+                            new(x1 - 1, py1 - 1),
+                            new(x2 + 1, py2 + 1),
                             color,
                             CoreSettings.NoteRoundness,
                             0,
@@ -513,8 +760,8 @@ public class ScreenCanvas
                 {
                     uint color = ImGui.GetColorU32(new Vector4(Vector3.Zero, 1f) * 0.5f);
                     drawList.AddRect(
-                        new Vector2(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4 - 1, py1 - 1),
-                        new Vector2(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4 + 1, py2 + 1),
+                        new Vector2(x1 - 1, py1 - 1),
+                        new Vector2(x2 + 1, py2 + 1),
                         color,
                         CoreSettings.NoteRoundness,
                         0,
@@ -522,17 +769,22 @@ public class ScreenCanvas
                     );
                 }
 
-                drawList.AddRectFilled(new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4, py1),
-                      new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4, py2),
+                drawList.AddRectFilled(new(x1, py1),
+                      new(x2, py2),
                       GetSharpColor(index), CoreSettings.NoteRoundness, ImDrawFlags.RoundCornersAll);
                 DrawNoteLabel(
                     drawList,
-                    new Vector2(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4, py1),
-                    new Vector2(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4, py2),
+                    new Vector2(x1, py1),
+                    new Vector2(x2, py2),
                     note.NoteNumber);
+
+                RegisterHitLineNoteEffect(index, py1, py2, x1, x2, col);
             }
             else
             {
+                float x1 = PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width;
+                float x2 = x1 + PianoRenderer.Width;
+
                 if (CoreSettings.NeonFx)
                 {
                     for (int i = 0; i < 3; i++)
@@ -541,8 +793,8 @@ public class ScreenCanvas
                         float alpha = 0.2f + (3 - i) * 0.2f;
                         uint color = ImGui.GetColorU32(new Vector4(col.X, col.Y, col.Z, alpha) * 0.5f);
                         drawList.AddRect(
-                            new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width - 1, py1 - 1),
-                            new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width + 1, py2 + 1),
+                            new(x1 - 1, py1 - 1),
+                            new(x2 + 1, py2 + 1),
                             color,
                             CoreSettings.NoteRoundness,
                             0,
@@ -554,8 +806,8 @@ public class ScreenCanvas
                 {
                     uint color = ImGui.GetColorU32(new Vector4(Vector3.Zero, 1f) * 0.5f);
                     drawList.AddRect(
-                        new Vector2(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width - 1, py1 - 1),
-                        new Vector2(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width + 1, py2 + 1),
+                        new Vector2(x1 - 1, py1 - 1),
+                        new Vector2(x2 + 1, py2 + 1),
                         color,
                         CoreSettings.NoteRoundness,
                         0,
@@ -563,17 +815,22 @@ public class ScreenCanvas
                     );
                 }
 
-                drawList.AddRectFilled(new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width, py1),
-                    new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width, py2),
+                drawList.AddRectFilled(new(x1, py1),
+                    new(x2, py2),
                     ImGui.GetColorU32(col), CoreSettings.NoteRoundness, ImDrawFlags.RoundCornersAll);
                 DrawNoteLabel(
                     drawList,
-                    new Vector2(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width, py1),
-                    new Vector2(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width, py2),
+                    new Vector2(x1, py1),
+                    new Vector2(x2, py2),
                     note.NoteNumber);
+
+                RegisterHitLineNoteEffect(index, py1, py2, x1, x2, col);
             }
             index++;
         }
+
+        DrawHitLineTransientEffects(drawList);
+
         if (IsLearningMode && !MidiPlayer.IsTimerRunning && !missingNote)
         {
             MidiPlayer.StartTimer();
@@ -1080,15 +1337,27 @@ public class ScreenCanvas
             if (ImGui.BeginCombo("##SoundFont", SoundFontPlayer.ActiveSoundFont, ImGuiComboFlags.HeightLargest | ImGuiComboFlags.WidthFitPreview))
             {
                 _comboSoundFont = true;
+                var seenSoundFontNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var folderPath in SoundFontsPathsManager.SoundFontsPaths)
                 {
-                    foreach (var soundFontPath in Directory.GetFiles(folderPath).Where(f => Path.GetExtension(f) == ".sf2"))
+                    if (!Directory.Exists(folderPath))
+                        continue;
+
+                    foreach (var soundFontPath in Directory.EnumerateFiles(folderPath, "*.sf2", SearchOption.TopDirectoryOnly))
                     {
-                        if (ImGui.Selectable(Path.GetFileNameWithoutExtension(soundFontPath)))
+                        string soundFontName = Path.GetFileNameWithoutExtension(soundFontPath);
+                        if (!seenSoundFontNames.Add(soundFontName))
+                            continue;
+
+                        bool isSelected = string.Equals(SoundFontPlayer.ActiveSoundFont, soundFontName, StringComparison.OrdinalIgnoreCase);
+                        if (ImGui.Selectable(soundFontName, isSelected))
                         {
                             MidiPlayer.SoundFontEngine?.StopAllNote(0);
                             SoundFontPlayer.LoadSoundFont(soundFontPath);
                         }
+
+                        if (isSelected)
+                            ImGui.SetItemDefaultFocus();
                     }
                 }
                 ImGui.EndCombo();

@@ -14,6 +14,7 @@ public static class IOHandle
 {
     public static List<int> PressedKeys { get; private set; } = new();
     private static Dictionary<int, Stack<bool>> _pressedKeyHands = new();
+    private static Dictionary<int, int> _activeNoteVoices = new();
 
     public static List<NoteRect> NoteRects = new();
 
@@ -65,8 +66,15 @@ public static class IOHandle
             NoteRects.Add(note);
         }
 
+        if (_activeNoteVoices.TryGetValue(noteNumber, out int activeVoices))
+            _activeNoteVoices[noteNumber] = activeVoices + 1;
+        else
+            _activeNoteVoices[noteNumber] = 1;
+
+        // Retrigger every NoteOn for proper articulation. StopNote is handled only when voice count reaches zero.
         MidiPlayer.SoundFontEngine?.PlayNote(0, noteNumber, velocity);
-        PressedKeys.Add(noteNumber);
+        if (!PressedKeys.Contains(noteNumber))
+            PressedKeys.Add(noteNumber);
 
         if (!_pressedKeyHands.TryGetValue(noteNumber, out var handStack))
         {
@@ -77,17 +85,31 @@ public static class IOHandle
         handStack.Push(isRightHand ?? true);
     }
 
-    private static void OnKeyReleased(SevenBitNumber noteNumber)
+    private static int OnKeyReleased(SevenBitNumber noteNumber)
     {
-        if (_sustainPedalActive)
+        int remainingVoices = 0;
+        if (_activeNoteVoices.TryGetValue(noteNumber, out int activeVoices))
         {
-            // If sustain pedal is active, don't stop the note immediately
-            _sustainedNotes.Add(noteNumber);
+            activeVoices = Math.Max(activeVoices - 1, 0);
+            if (activeVoices == 0)
+                _activeNoteVoices.Remove(noteNumber);
+            else
+                _activeNoteVoices[noteNumber] = activeVoices;
+
+            remainingVoices = activeVoices;
         }
-        else
+
+        if (remainingVoices == 0)
         {
-            // If sustain pedal is not active, stop the note immediately
-            MidiPlayer.SoundFontEngine?.StopNote(0, noteNumber);
+            if (_sustainPedalActive)
+            {
+                // If sustain pedal is active, keep note alive until pedal release.
+                _sustainedNotes.Add(noteNumber);
+            }
+            else
+            {
+                MidiPlayer.SoundFontEngine?.StopNote(0, noteNumber);
+            }
         }
 
         if (WindowsManager.Window == Enums.Windows.PlayMode)
@@ -102,7 +124,8 @@ public static class IOHandle
             }
         }
 
-        PressedKeys.Remove(noteNumber);
+        if (remainingVoices == 0)
+            PressedKeys.Remove(noteNumber);
 
         if (_pressedKeyHands.TryGetValue(noteNumber, out var handStack))
         {
@@ -112,6 +135,8 @@ public static class IOHandle
             if (handStack.Count == 0)
                 _pressedKeyHands.Remove(noteNumber);
         }
+
+        return remainingVoices;
     }
 
     private static void OnNoteOn(NoteOnEvent ev, bool? isRightHand = null)
@@ -119,18 +144,30 @@ public static class IOHandle
         SevenBitNumber velocity = ev.Velocity;
         if (CoreSettings.VelocityZeroIsNoteOff && velocity == 0)
         {
-            OnKeyReleased(ev.NoteNumber);
+            int remainingVoices = OnKeyReleased(ev.NoteNumber);
+            if (CoreSettings.SoundEngine == Enums.SoundEngine.Plugins && remainingVoices == 0)
+            {
+                VstPlayer.PluginsChain?.PluginInstrument?.ReceiveMidiEvent(new NoteOffEvent(ev.NoteNumber, (SevenBitNumber)0));
+            }
         }
         else
         {
             bool isBlack = ev.GetNoteName().ToString().EndsWith("Sharp");
             OnKeyPressed(ev.NoteNumber, velocity, isBlack, isRightHand);
+            if (CoreSettings.SoundEngine == Enums.SoundEngine.Plugins)
+            {
+                VstPlayer.PluginsChain?.PluginInstrument?.ReceiveMidiEvent(ev);
+            }
         }
     }
 
     private static void OnNoteOff(NoteOffEvent ev)
     {
-        OnKeyReleased(ev.NoteNumber);
+        int remainingVoices = OnKeyReleased(ev.NoteNumber);
+        if (CoreSettings.SoundEngine == Enums.SoundEngine.Plugins && remainingVoices == 0)
+        {
+            VstPlayer.PluginsChain?.PluginInstrument?.ReceiveMidiEvent(ev);
+        }
     }
 
     private static void OnSustainPedalOn()
@@ -141,10 +178,14 @@ public static class IOHandle
     private static void OnSustainPedalOff()
     {
         _sustainPedalActive = false;
-        // Stop all sustained notes when the sustain pedal is released
+
+        // Stop sustained notes that are no longer actively held.
         foreach (var note in _sustainedNotes)
         {
-            MidiPlayer.SoundFontEngine?.StopNote(0, note);
+            if (!_activeNoteVoices.TryGetValue(note, out int activeVoices) || activeVoices == 0)
+            {
+                MidiPlayer.SoundFontEngine?.StopNote(0, note);
+            }
         }
         _sustainedNotes.Clear();
     }
@@ -175,11 +216,6 @@ public static class IOHandle
     {
         var eType = e.Event.EventType;
 
-        if (CoreSettings.SoundEngine == Enums.SoundEngine.Plugins)
-        {
-            VstPlayer.PluginsChain?.PluginInstrument?.ReceiveMidiEvent(e.Event);
-        }
-
         switch (eType)
         {
             case MidiEventType.NoteOn:
@@ -190,6 +226,10 @@ public static class IOHandle
                 break;
             case MidiEventType.ControlChange:
                 var controlChangeEvent = (ControlChangeEvent)e.Event;
+                if (CoreSettings.SoundEngine == Enums.SoundEngine.Plugins)
+                {
+                    VstPlayer.PluginsChain?.PluginInstrument?.ReceiveMidiEvent(controlChangeEvent);
+                }
                 if (controlChangeEvent.ControlNumber == 64) // 64 is the sustain pedal
                 {
                     if (controlChangeEvent.ControlValue > 63)  // Sustain pedal ON (value greater than 63)
@@ -211,11 +251,6 @@ public static class IOHandle
         if (ScreenCanvasControls.IsLearningMode)
             return;
 
-        if (CoreSettings.SoundEngine == Enums.SoundEngine.Plugins)
-        {
-            VstPlayer.PluginsChain?.PluginInstrument?.ReceiveMidiEvent(e.Event);
-        }
-
         var eType = e.Event.EventType;
 
         switch (eType)
@@ -230,6 +265,10 @@ public static class IOHandle
                 break;
             case MidiEventType.ControlChange:
                 var controlChangeEvent = (ControlChangeEvent)e.Event;
+                if (CoreSettings.SoundEngine == Enums.SoundEngine.Plugins)
+                {
+                    VstPlayer.PluginsChain?.PluginInstrument?.ReceiveMidiEvent(controlChangeEvent);
+                }
                 if (controlChangeEvent.ControlNumber == 64) // 64 is the sustain pedal
                 {
                     if (controlChangeEvent.ControlValue > 63)  // Sustain pedal ON (value greater than 63)
