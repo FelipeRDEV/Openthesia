@@ -107,8 +107,8 @@ public static class ProgramData
                 CoreSettings.SetNoteRoundness(storedSettings.NoteRoundness);
                 ThemeManager.SetTheme(storedSettings.Theme);
                 ThemeManager.MainBgCol = storedSettings.MainBg;
-                ThemeManager.RightHandCol = storedSettings.R_HandColor;
-                ThemeManager.LeftHandCol = storedSettings.L_HandColor;
+                var storedFade = storedSettings.R_HandColor.W <= 0f ? storedSettings.L_HandColor : storedSettings.R_HandColor;
+                ThemeManager.SetNoteFadeColor(storedFade);
                 ScreenCanvasControls.SetLockTopBar(storedSettings.LockTopBar);
                 ScreenCanvasControls.SetUpDirection(storedSettings.UpDirection);
                 ScreenCanvasControls.SetTextNotes(storedSettings.ShowTextNotes);
@@ -179,8 +179,8 @@ public static class ProgramData
             FpsCounter = CoreSettings.FpsCounter,
             Theme = ThemeManager.Theme,
             MainBg = ThemeManager.MainBgCol,
-            R_HandColor = ThemeManager.RightHandCol,
-            L_HandColor = ThemeManager.LeftHandCol,
+            R_HandColor = ThemeManager.NoteFadeCol,
+            L_HandColor = ThemeManager.NoteFadeCol,
             LockTopBar = ScreenCanvasControls.LockTopBar,
             UpDirection = ScreenCanvasControls.UpDirection,
             ShowTextNotes = ScreenCanvasControls.ShowTextNotes,

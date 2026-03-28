@@ -14,6 +14,7 @@ public static class IOHandle
 {
     public static List<int> PressedKeys { get; private set; } = new();
     private static Dictionary<int, Stack<bool>> _pressedKeyHands = new();
+    private static Dictionary<int, Stack<float>> _pressedKeyVelocities = new();
     private static Dictionary<int, int> _activeNoteVoices = new();
 
     public static List<NoteRect> NoteRects = new();
@@ -27,6 +28,7 @@ public static class IOHandle
     {
         public int KeyNum;
         public bool IsBlack;
+        public float VelocityNorm;
         public float PY1;
         public float PY2;
         public float Time;
@@ -36,12 +38,32 @@ public static class IOHandle
 
     public static Vector4 GetPressedKeyColor(int noteNumber)
     {
-        if (_pressedKeyHands.TryGetValue(noteNumber, out var handStack) && handStack.Count > 0)
-        {
-            return handStack.Peek() ? ThemeManager.RightHandCol : ThemeManager.LeftHandCol;
-        }
+        const float minMidi = 21f;
+        const float maxMidi = 108f;
+        float t = Math.Clamp((noteNumber - minMidi) / (maxMidi - minMidi), 0f, 1f);
 
-        return ThemeManager.RightHandCol;
+        Vector4 baseColor = ThemeManager.NoteFadeCol;
+        Vector4 dark = new(baseColor.X * 0.48f, baseColor.Y * 0.48f, baseColor.Z * 0.48f, baseColor.W);
+        Vector4 bright = Vector4.Lerp(baseColor, Vector4.One, 0.22f);
+        Vector4 result = Vector4.Lerp(dark, bright, t);
+        if (CoreSettings.UseVelocityAsNoteOpacity)
+        {
+            float velocityNorm = 1f;
+            if (_pressedKeyVelocities.TryGetValue(noteNumber, out var velocityStack) && velocityStack.Count > 0)
+                velocityNorm = Math.Clamp(velocityStack.Peek(), 0f, 1f);
+
+            float shaped = MathF.Pow(velocityNorm, 1.25f);
+            float brightness = 0.24f + 0.76f * shaped;
+            result.X *= brightness;
+            result.Y *= brightness;
+            result.Z *= brightness;
+            result.W = Math.Clamp(MathF.Pow(velocityNorm, 1.45f), 0.02f, 1f);
+        }
+        else
+        {
+            result.W = baseColor.W;
+        }
+        return result;
     }
 
     private static void OnKeyPressed(SevenBitNumber noteNumber, SevenBitNumber velocity, bool isBlack, bool? isRightHand)
@@ -59,6 +81,7 @@ public static class IOHandle
             {
                 KeyNum = noteNumber,
                 IsBlack = isBlack,
+                VelocityNorm = Math.Clamp((int)velocity / 127f, 0f, 1f),
                 PY1 = PianoRenderer.P.Y,
                 PY2 = PianoRenderer.P.Y,
                 Time = 0f,
@@ -83,6 +106,13 @@ public static class IOHandle
         }
 
         handStack.Push(isRightHand ?? true);
+
+        if (!_pressedKeyVelocities.TryGetValue(noteNumber, out var velocityStack))
+        {
+            velocityStack = new Stack<float>();
+            _pressedKeyVelocities[noteNumber] = velocityStack;
+        }
+        velocityStack.Push(Math.Clamp((int)velocity / 127f, 0f, 1f));
     }
 
     private static int OnKeyReleased(SevenBitNumber noteNumber)
@@ -134,6 +164,15 @@ public static class IOHandle
 
             if (handStack.Count == 0)
                 _pressedKeyHands.Remove(noteNumber);
+        }
+
+        if (_pressedKeyVelocities.TryGetValue(noteNumber, out var velocityStack))
+        {
+            if (velocityStack.Count > 0)
+                velocityStack.Pop();
+
+            if (velocityStack.Count == 0)
+                _pressedKeyVelocities.Remove(noteNumber);
         }
 
         return remainingVoices;

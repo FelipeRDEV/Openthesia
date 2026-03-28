@@ -34,7 +34,7 @@ public class ModeSelectionWindow : ImGuiWindow
 
             RenderIconWithText(FontAwesome6.Music, "Peacefully listen and visualize the piece", 0.1f, 2.5f);
             RenderIconWithText(FontAwesome6.Gamepad, "Playback will wait for the right note input", 0.36f, 2.5f);
-            RenderIconWithText(FontAwesome6.Hands, "Separate right and left hands with colors", 0.625f, 2.5f);
+            RenderIconWithText(FontAwesome6.Hands, "Smart hand suggestion for practice", 0.625f, 2.5f);
 
             RenderButton("View and listen", "#31CB15", 0.1f, 1.5f, () => SetupMode(false, false));
             RenderButton("Play along", "#0EA5E9", 0.36f, 1.5f, () => SetupMode(true, false));

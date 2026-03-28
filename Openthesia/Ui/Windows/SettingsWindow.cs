@@ -598,9 +598,11 @@ public class SettingsWindow : ImGuiWindow
 
         ImGui.ColorEdit4("Background color", ref MainBgCol, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoAlpha | ImGuiColorEditFlags.NoDragDrop);
         ImGui.SameLine();
-        ImGui.ColorEdit4("Right Hand color", ref RightHandCol, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoAlpha | ImGuiColorEditFlags.NoDragDrop);
-        ImGui.SameLine();
-        ImGui.ColorEdit4("Left Hand color", ref LeftHandCol, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoAlpha | ImGuiColorEditFlags.NoDragDrop);
+        Vector4 noteFadeColor = NoteFadeCol;
+        if (ImGui.ColorEdit4("Note fade color", ref noteFadeColor, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoAlpha | ImGuiColorEditFlags.NoDragDrop))
+        {
+            SetNoteFadeColor(noteFadeColor);
+        }
         ImGui.SameLine();
         ImGui.Checkbox("Notes glow FX", ref NeonFx);
         Drawings.Tooltip("Adds a subtle glowing effect around each note");

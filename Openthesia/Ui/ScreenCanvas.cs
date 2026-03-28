@@ -94,25 +94,83 @@ public class ScreenCanvas
         return a + (b - a) * t;
     }
     
-    private static bool IsNoteEnabled(int index)
+    private static bool IsNoteEnabled(int index) => true;
+
+    private static float GetNoteGradientT(int midiNote)
     {
-        return LeftRightData.S_IsRightNote[index] && RightHandActive ||
-               !LeftRightData.S_IsRightNote[index] && LeftHandActive;
+        const float minMidi = 21f;
+        const float maxMidi = 108f;
+        return Math.Clamp((midiNote - minMidi) / (maxMidi - minMidi), 0f, 1f);
     }
 
-    private static Vector4 GetNoteColor(int index)
+    private static Vector4 GetGradientNoteColor(int midiNote)
     {
-        if (LeftRightData.S_IsRightNote[index])
+        Vector4 baseColor = ThemeManager.NoteFadeCol;
+        float t = GetNoteGradientT(midiNote);
+        Vector4 dark = new(baseColor.X * 0.48f, baseColor.Y * 0.48f, baseColor.Z * 0.48f, baseColor.W);
+        Vector4 bright = Vector4.Lerp(baseColor, Vector4.One, 0.22f);
+        Vector4 result = Vector4.Lerp(dark, bright, t);
+        result.W = baseColor.W;
+        return result;
+    }
+
+    private static Vector4 GetNoteColor(int index, int midiNote)
+    {
+        return IsNoteEnabled(index) ? GetGradientNoteColor(midiNote) : ThemeManager.MainBgCol;
+    }
+
+    private static Vector4 ScaleRgb(Vector4 color, float factor)
+    {
+        return new Vector4(color.X * factor, color.Y * factor, color.Z * factor, color.W);
+    }
+
+    private static Vector4 ApplyVelocityVisualToColor(Vector4 baseColor, float velocityNorm)
+    {
+        if (!CoreSettings.UseVelocityAsNoteOpacity)
+            return baseColor;
+
+        float v = Math.Clamp(velocityNorm, 0f, 1f);
+        float shaped = MathF.Pow(v, 1.25f);
+        float brightness = 0.24f + 0.76f * shaped;
+        Vector4 c = ScaleRgb(baseColor, brightness);
+        c.W = Math.Clamp(MathF.Pow(v, 1.45f), 0.02f, 1f);
+        return c;
+    }
+
+    private static void GetNoteBodyGradient(Vector4 baseColor, bool isBlack, out Vector4 leftCol, out Vector4 rightCol)
+    {
+        float alpha = baseColor.W;
+        float leftMul = isBlack ? 0.72f : 0.84f;
+        float rightBright = isBlack ? 0.26f : 0.44f;
+        leftCol = ScaleRgb(baseColor, leftMul);
+        rightCol = Vector4.Lerp(baseColor, Vector4.One, rightBright);
+        leftCol.W = alpha;
+        rightCol.W = alpha;
+    }
+
+    private static void DrawHorizontalGradientNoteBody(
+        ImDrawListPtr drawList,
+        Vector2 min,
+        Vector2 max,
+        Vector4 leftCol,
+        Vector4 rightCol,
+        float rounding)
+    {
+        // Continuous gradient to avoid visible vertical seams.
+        drawList.AddRectFilledMultiColor(
+            min,
+            max,
+            ImGui.GetColorU32(leftCol),
+            ImGui.GetColorU32(rightCol),
+            ImGui.GetColorU32(rightCol),
+            ImGui.GetColorU32(leftCol));
+
+        // Re-apply rounded corners as an outline layer.
+        if (rounding > 0f)
         {
-            return RightHandActive ? ThemeManager.RightHandCol : ThemeManager.MainBgCol;
+            Vector4 avg = Vector4.Lerp(leftCol, rightCol, 0.5f);
+            drawList.AddRect(min, max, ImGui.GetColorU32(avg), rounding, ImDrawFlags.RoundCornersAll, 1f);
         }
-        return LeftHandActive ? ThemeManager.LeftHandCol : ThemeManager.MainBgCol;
-    }
-
-    private static uint GetSharpColor(int index)
-    {
-        var color = IsNoteEnabled(index) ? ImGuiUtils.DarkenColor(GetNoteColor(index), 0.4f) : ThemeManager.MainBgCol;
-        return ImGui.GetColorU32(color);
     }
 
     private static void DrawNoteLabel(ImDrawListPtr drawList, Vector2 min, Vector2 max, int midiNote)
@@ -176,54 +234,67 @@ public class ScreenCanvas
     private static void DrawHitLineConsumeEffect(ImDrawListPtr drawList, float x1, float x2, Vector4 color, float intensity, float verticalScale)
     {
         float lineY = PianoRenderer.P.Y - 1f;
-        Vector3 rgb = new(color.X, color.Y, color.Z);
+        float velScale = CoreSettings.UseVelocityAsNoteOpacity
+            ? Math.Clamp(color.W, 0.12f, 1f)
+            : 1f;
+        Vector3 sourceRgb = new(color.X, color.Y, color.Z);
+        Vector3 rgb = Vector3.Lerp(sourceRgb, Vector3.One, 0.34f);
         float width = MathF.Max(6f, x2 - x1);
-        float time = (float)ImGui.GetTime();
-        float pulse = 0.9f + 0.1f * MathF.Sin(time * 8f + (x1 + x2) * 0.05f);
-        float energy = Math.Clamp(intensity * pulse, 0.08f, 2.1f);
-        float riseScale = Math.Clamp(verticalScale, 0.3f, 1f);
+        float glowBoost = 1.05f + 0.18f * velScale;
+        float energy = Math.Clamp(intensity * glowBoost, 0.1f, 1.7f);
+        float riseScale = Math.Clamp(verticalScale, 0.5f, 1.1f);
         float roundnessBase = Math.Clamp(width * 0.28f, 2f, 6f);
-        Vector3 hot = Vector3.Lerp(rgb, Vector3.One, 0.34f);
+        Vector3 hot = Vector3.Lerp(rgb, Vector3.One, 0.62f);
 
         // Keep horizontal spread very close to key width.
         float corePadX = Math.Clamp(width * 0.012f, 0f, 0.24f);
         float auraPadX = corePadX + Math.Clamp(width * 0.008f, 0.04f, 0.2f);
 
-        // Strong upward bloom while keeping only a thin tail below the line.
-        float upReach = (10f + 28f * energy) * riseScale;
-        float coreDown = 0.9f + 0.45f * energy;
-        float auraUp = upReach + (7f + 6f * energy) * riseScale;
-        float auraDown = 1.7f + 0.7f * energy;
+        // Compact upward bloom with smooth vertical softness.
+        float upReach = (8f + 24f * energy) * riseScale;
+        float coreDown = 0.6f + 0.24f * energy;
+        float auraUp = upReach + (8f + 12f * energy) * riseScale;
+        float auraDown = 1.0f + 0.28f * energy;
+        float farAuraUp = auraUp + (10f + 16f * energy) * riseScale;
+        float farAuraDown = auraDown + 0.9f;
+
+        drawList.AddRectFilledMultiColor(
+            new Vector2(x1 - auraPadX - 0.25f, lineY - farAuraUp),
+            new Vector2(x2 + auraPadX + 0.25f, lineY + farAuraDown),
+                ImGui.GetColorU32(new Vector4(rgb, 0f)),
+                ImGui.GetColorU32(new Vector4(rgb, 0f)),
+                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.16f * energy, 0.04f, 0.24f))),
+                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.16f * energy, 0.04f, 0.24f))));
 
         drawList.AddRectFilledMultiColor(
             new Vector2(x1 - auraPadX, lineY - auraUp),
             new Vector2(x2 + auraPadX, lineY + auraDown),
-            ImGui.GetColorU32(new Vector4(rgb, 0f)),
-            ImGui.GetColorU32(new Vector4(rgb, 0f)),
-            ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.28f * energy, 0.1f, 0.5f))),
-            ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.28f * energy, 0.1f, 0.5f))));
+                ImGui.GetColorU32(new Vector4(rgb, 0f)),
+                ImGui.GetColorU32(new Vector4(rgb, 0f)),
+                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.26f * energy, 0.08f, 0.46f))),
+                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.26f * energy, 0.08f, 0.46f))));
 
         drawList.AddRectFilledMultiColor(
             new Vector2(x1 - corePadX, lineY - upReach),
             new Vector2(x2 + corePadX, lineY + coreDown),
-            ImGui.GetColorU32(new Vector4(hot, 0f)),
-            ImGui.GetColorU32(new Vector4(hot, 0f)),
-            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.92f * energy, 0.2f, 1f))),
-            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.92f * energy, 0.2f, 1f))));
+                ImGui.GetColorU32(new Vector4(hot, 0f)),
+                ImGui.GetColorU32(new Vector4(hot, 0f)),
+                ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.95f * energy, 0.18f, 0.92f))),
+                ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.95f * energy, 0.18f, 0.92f))));
 
-        float flashHalfHeight = 1.6f + 1.1f * energy;
+        float flashHalfHeight = 1.25f + 0.85f * energy;
         drawList.AddRectFilled(
             new Vector2(x1 - corePadX, lineY - flashHalfHeight),
             new Vector2(x2 + corePadX, lineY + flashHalfHeight),
-            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.74f * energy, 0.2f, 0.95f))),
+            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.88f * energy, 0.2f, 0.9f))),
             roundnessBase + 1.2f,
             ImDrawFlags.RoundCornersAll);
 
-        float coreThickness = 2.1f + energy * 2f;
+        float coreThickness = 1.8f + energy * 1.4f;
         drawList.AddLine(
             new Vector2(x1 - corePadX, lineY),
             new Vector2(x2 + corePadX, lineY),
-            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(1.05f * energy, 0.35f, 1f))),
+            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(1.06f * energy, 0.28f, 0.95f))),
             coreThickness);
 
         // Keep only one core stroke to avoid "double glow" look on the hit line.
@@ -242,7 +313,11 @@ public class ScreenCanvas
         spawnCount = Math.Min(spawnCount, available);
         float width = MathF.Max(6f, x2 - x1);
         float lineY = PianoRenderer.P.Y - 1f;
+        float opacityScale = CoreSettings.UseVelocityAsNoteOpacity
+            ? Math.Clamp(MathF.Pow(noteColor.W, 1.05f), 0.08f, 1f)
+            : 1f;
         Vector4 particleColor = Vector4.Lerp(noteColor, Vector4.One, 0.72f);
+        particleColor.W = opacityScale;
 
         for (int i = 0; i < spawnCount; i++)
         {
@@ -270,7 +345,7 @@ public class ScreenCanvas
         float playbackSpeed = MidiPlayer.Playback is null ? 1f : (float)MidiPlayer.Playback.Speed;
         playbackSpeed = Math.Clamp(playbackSpeed, 0.25f, 4f);
         float speedScale = playbackSpeed;
-        float glowDecay = MathF.Exp(-dt * (8.2f + 3.4f * speedScale));
+        float glowDecay = MathF.Exp(-dt * (12.5f + 5.5f * speedScale));
 
         _hitLineGlowKeys.Clear();
         foreach (var key in _hitLineGlows.Keys)
@@ -285,7 +360,7 @@ public class ScreenCanvas
                 continue;
 
             glow.Intensity *= glowDecay;
-            if (glow.Intensity < 0.11f)
+            if (glow.Intensity < 0.13f)
             {
                 _hitLineGlowsToRemove.Add(key);
                 continue;
@@ -315,7 +390,7 @@ public class ScreenCanvas
             particle.Position += particle.Velocity * dt;
             particle.Velocity *= particleDrag;
             float life01 = particle.Life / particle.MaxLife;
-            float alpha = MathF.Pow(life01, 1.2f) * 1.35f;
+            float alpha = MathF.Pow(life01, 1.2f) * 1.35f * particle.Color.W;
             float size = particle.Size * (0.65f + life01 * 1.05f);
             Vector4 color = new Vector4(particle.Color.X, particle.Color.Y, particle.Color.Z, alpha);
 
@@ -338,23 +413,28 @@ public class ScreenCanvas
 
         float dt = Math.Clamp(ImGui.GetIO().DeltaTime, 0.001f, 0.05f);
         float lineY = PianoRenderer.P.Y;
-        float edgeDistance = MathF.Min(MathF.Abs(py2 - lineY), MathF.Abs(py1 - lineY));
+        float edgeDistance = MathF.Abs(py2 - lineY);
         float edgeBurst = MathF.Exp(-edgeDistance / 8f);
         float sustain = 0.05f;
-        float targetIntensity = Math.Clamp(sustain + edgeBurst * 1.45f, 0.2f, 1.7f);
+        float velocityOpacityScale = CoreSettings.UseVelocityAsNoteOpacity
+            ? Math.Clamp(MathF.Pow(noteColor.W, 1.2f), 0.08f, 1f)
+            : 1f;
+        float targetIntensity = Math.Clamp((sustain + edgeBurst * 1.2f) * (0.3f + 0.7f * velocityOpacityScale), 0.18f, 1.5f);
         float noteVisualHeight = MathF.Max(2f, py2 - py1);
-        float targetVerticalScale = Math.Clamp((noteVisualHeight - 6f) / 72f, 0.3f, 1f);
+        float targetVerticalScale = Math.Clamp((noteVisualHeight + 10f) / 68f, 0.5f, 1.1f);
 
         if (_hitLineGlows.TryGetValue(noteId, out var glow))
         {
             glow.X1 = Lerp(glow.X1, x1, 0.45f);
             glow.X2 = Lerp(glow.X2, x2, 0.45f);
-            glow.Color = Vector4.Lerp(glow.Color, noteColor, 0.26f);
+            Vector4 glowColor = Vector4.Lerp(noteColor, Vector4.One, 0.22f);
+            glowColor.W = noteColor.W;
+            glow.Color = Vector4.Lerp(glow.Color, glowColor, 0.32f);
             glow.Intensity = MathF.Max(glow.Intensity * 0.84f + targetIntensity * 0.55f, targetIntensity);
             glow.VerticalScale = MathF.Max(glow.VerticalScale * 0.82f + targetVerticalScale * 0.48f, targetVerticalScale);
 
             float width = MathF.Max(6f, x2 - x1);
-            float emitRate = (34f + width * 0.42f) * (0.68f + targetIntensity * 1.14f);
+            float emitRate = (34f + width * 0.42f) * (0.68f + targetIntensity * 1.14f) * (0.5f + 0.5f * velocityOpacityScale);
             if (edgeBurst > 0.55f)
                 emitRate += 54f * edgeBurst;
             glow.ParticleCarry += emitRate * dt;
@@ -366,16 +446,18 @@ public class ScreenCanvas
         else
         {
             float width = MathF.Max(6f, x2 - x1);
-            float emitRate = (34f + width * 0.42f) * (0.68f + targetIntensity * 1.14f);
+            float emitRate = (34f + width * 0.42f) * (0.68f + targetIntensity * 1.14f) * (0.5f + 0.5f * velocityOpacityScale);
             float carry = emitRate * dt;
             int spawnCount = Math.Min(24, Math.Max(1, (int)carry));
             carry = MathF.Max(0f, carry - spawnCount);
+            Vector4 initialGlowColor = Vector4.Lerp(noteColor, Vector4.One, 0.22f);
+            initialGlowColor.W = noteColor.W;
 
             _hitLineGlows[noteId] = new HitLineGlowState
             {
                 X1 = x1,
                 X2 = x2,
-                Color = noteColor,
+                Color = initialGlowColor,
                 Intensity = targetIntensity * 0.9f,
                 VerticalScale = targetVerticalScale,
                 ParticleCarry = carry
@@ -450,13 +532,16 @@ public class ScreenCanvas
 
             if (note.IsBlack)
             {
+                float inputVelocityNorm = note.VelocityNorm <= 0f ? 1f : note.VelocityNorm;
+
                 if (CoreSettings.NeonFx)
                 {
                     for (int i = 0; i < 3; i++)
                     {
                         float thickness = i * 2;
                         float alpha = 0.2f + (3 - i) * 0.2f;
-                        uint color = ImGui.GetColorU32(new Vector4(ThemeManager.RightHandCol.X, ThemeManager.RightHandCol.Y, ThemeManager.RightHandCol.Z, alpha) * 0.5f * 0.7f);
+                        Vector4 playNoteColor = ApplyVelocityVisualToColor(GetGradientNoteColor(note.KeyNum), inputVelocityNorm);
+                        uint color = ImGui.GetColorU32(new Vector4(playNoteColor.X, playNoteColor.Y, playNoteColor.Z, alpha) * 0.5f * 0.7f);
                         drawList.AddRect(
                             new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4 - 1, py1 - 1),
                             new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4 + 1, py2 + 1),
@@ -469,7 +554,7 @@ public class ScreenCanvas
                 }
                 else
                 {
-                    uint color = ImGui.GetColorU32(new Vector4(Vector3.Zero, 1f) * 0.5f);
+                        uint color = ImGui.GetColorU32(new Vector4(Vector3.Zero, 1f) * 0.5f);
                     drawList.AddRect(
                         new Vector2(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4 - 1, py1 - 1),
                         new Vector2(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4 + 1, py2 + 1),
@@ -480,9 +565,11 @@ public class ScreenCanvas
                     );
                 }
 
-                drawList.AddRectFilled(new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4, py1),
-                  new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4, py2),
-                  ImGui.GetColorU32(ThemeManager.RightHandCol * 0.7f), CoreSettings.NoteRoundness, ImDrawFlags.RoundCornersAll);
+                float bx1 = PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4;
+                float bx2 = PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4;
+                Vector4 blackBase = ApplyVelocityVisualToColor(ImGuiUtils.DarkenColor(GetGradientNoteColor(note.KeyNum), 0.2f), inputVelocityNorm);
+                GetNoteBodyGradient(blackBase, true, out var blackLeft, out var blackRight);
+                DrawHorizontalGradientNoteBody(drawList, new Vector2(bx1, py1), new Vector2(bx2, py2), blackLeft, blackRight, CoreSettings.NoteRoundness);
 
                 DrawNoteLabel(
                     drawList,
@@ -492,13 +579,16 @@ public class ScreenCanvas
             }
             else
             {
+                float inputVelocityNorm = note.VelocityNorm <= 0f ? 1f : note.VelocityNorm;
+
                 if (CoreSettings.NeonFx)
                 {
                     for (int i = 0; i < 3; i++)
                     {
                         float thickness = i * 2;
                         float alpha = 0.2f + (3 - i) * 0.2f;
-                        uint color = ImGui.GetColorU32(new Vector4(ThemeManager.RightHandCol.X, ThemeManager.RightHandCol.Y, ThemeManager.RightHandCol.Z, alpha) * 0.5f);
+                        Vector4 playNoteColor = ApplyVelocityVisualToColor(GetGradientNoteColor(note.KeyNum), inputVelocityNorm);
+                        uint color = ImGui.GetColorU32(new Vector4(playNoteColor.X, playNoteColor.Y, playNoteColor.Z, alpha) * 0.5f);
                         drawList.AddRect(
                             new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width - 1, py1 - 1),
                             new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width + 1, py2 + 1),
@@ -522,9 +612,11 @@ public class ScreenCanvas
                     );
                 }
 
-                drawList.AddRectFilled(new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width, py1),
-                    new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width, py2),
-                    ImGui.GetColorU32(ThemeManager.RightHandCol), CoreSettings.NoteRoundness, ImDrawFlags.RoundCornersAll);
+                float wx1 = PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width;
+                float wx2 = wx1 + PianoRenderer.Width;
+                Vector4 whiteBase = ApplyVelocityVisualToColor(GetGradientNoteColor(note.KeyNum), inputVelocityNorm);
+                GetNoteBodyGradient(whiteBase, false, out var whiteLeft, out var whiteRight);
+                DrawHorizontalGradientNoteBody(drawList, new Vector2(wx1, py1), new Vector2(wx2, py2), whiteLeft, whiteRight, CoreSettings.NoteRoundness);
 
                 DrawNoteLabel(
                     drawList,
@@ -558,13 +650,13 @@ public class ScreenCanvas
         {
             var time = (float)note.TimeAs<MetricTimeSpan>(MidiFileData.TempoMap).TotalSeconds * FallSpeedVal;
             var length = (float)note.LengthAs<MetricTimeSpan>(MidiFileData.TempoMap).TotalSeconds * FallSpeedVal;
-            var col = GetNoteColor(index);
+            var col = GetNoteColor(index, note.NoteNumber);
             
             // color opacity based on note velocity
             if (CoreSettings.UseVelocityAsNoteOpacity)
             {
-                col.W = note.Velocity * 1.27f / 161.29f;
-                col.W = Math.Clamp(col.W, 0.3f, 1f); // we clamp it so they don't disappear with lower velocities
+                float velocity01 = Math.Clamp(note.Velocity / 127f, 0f, 1f);
+                col = ApplyVelocityVisualToColor(col, velocity01);
             }
 
             float py1;
@@ -769,9 +861,9 @@ public class ScreenCanvas
                     );
                 }
 
-                drawList.AddRectFilled(new(x1, py1),
-                      new(x2, py2),
-                      GetSharpColor(index), CoreSettings.NoteRoundness, ImDrawFlags.RoundCornersAll);
+                Vector4 sharpBase = ImGuiUtils.DarkenColor(col, 0.2f);
+                GetNoteBodyGradient(sharpBase, true, out var sharpLeft, out var sharpRight);
+                DrawHorizontalGradientNoteBody(drawList, new Vector2(x1, py1), new Vector2(x2, py2), sharpLeft, sharpRight, CoreSettings.NoteRoundness);
                 DrawNoteLabel(
                     drawList,
                     new Vector2(x1, py1),
@@ -815,9 +907,8 @@ public class ScreenCanvas
                     );
                 }
 
-                drawList.AddRectFilled(new(x1, py1),
-                    new(x2, py2),
-                    ImGui.GetColorU32(col), CoreSettings.NoteRoundness, ImDrawFlags.RoundCornersAll);
+                GetNoteBodyGradient(col, false, out var whiteLeftCol, out var whiteRightCol);
+                DrawHorizontalGradientNoteBody(drawList, new Vector2(x1, py1), new Vector2(x2, py2), whiteLeftCol, whiteRightCol, CoreSettings.NoteRoundness);
                 DrawNoteLabel(
                     drawList,
                     new Vector2(x1, py1),
@@ -1258,26 +1349,6 @@ public class ScreenCanvas
         }
     }
 
-    private static void DrawHandToggleButtons()
-    {
-        ImGui.PushFont(FontController.Font16_Icon16);
-        ImGui.SetCursorScreenPos(new(ImGuiUtils.FixedSize(new Vector2(160)).X, CanvasPos.Y + ImGuiUtils.FixedSize(new Vector2(110)).Y));
-        ImGui.PushStyleColor(ImGuiCol.Button, LeftHandActive ? ImGuiTheme.Button : ImGuiTheme.DarkButton);
-        if (ImGui.Button("L", ImGuiUtils.FixedSize(new Vector2(25, 35))))
-        {
-            LeftHandActive = !LeftHandActive;
-        }
-        ImGui.PopStyleColor();
-        ImGui.SetCursorScreenPos(new(ImGuiUtils.FixedSize(new Vector2(190)).X, CanvasPos.Y + ImGuiUtils.FixedSize(new Vector2(110)).Y));
-        ImGui.PushStyleColor(ImGuiCol.Button, RightHandActive ? ImGuiTheme.Button : ImGuiTheme.DarkButton);
-        if (ImGui.Button("R", ImGuiUtils.FixedSize(new Vector2(25, 35))))
-        {
-            RightHandActive = !RightHandActive;
-        }
-        ImGui.PopStyleColor();
-        ImGui.PopFont();
-    }
-
     private static void DrawSharedControls(bool showTopBar, bool playMode)
     {
         if (!showTopBar && !LockTopBar)
@@ -1311,24 +1382,20 @@ public class ScreenCanvas
         }
         ImGui.PopFont();
 
-        // LEFT HAND COLOR PICKER
-        ImGui.SetCursorScreenPos(new(ImGuiUtils.FixedSize(new Vector2(70)).X, CanvasPos.Y + ImGuiUtils.FixedSize(new Vector2(110)).Y));
-        ImGui.ColorEdit4("Left Hand Color", ref ThemeManager.LeftHandCol, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoLabel
-            | ImGuiColorEditFlags.NoDragDrop | ImGuiColorEditFlags.NoOptions | ImGuiColorEditFlags.NoAlpha);
-
-        _leftHandColorPicker = ImGui.IsPopupOpen("Left Hand Colorpicker");
-
-        // RIGHT HAND COLOR PICKER
-        ImGui.SetCursorScreenPos(new(ImGuiUtils.FixedSize(new Vector2(115)).X, CanvasPos.Y + ImGuiUtils.FixedSize(new Vector2(110)).Y));
-        ImGui.ColorEdit4("Right Hand Color", ref ThemeManager.RightHandCol, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoLabel
-            | ImGuiColorEditFlags.NoDragDrop | ImGuiColorEditFlags.NoOptions | ImGuiColorEditFlags.NoAlpha);
-
-        _rightHandColorPicker = ImGui.IsPopupOpen("Right Hand Colorpicker");
-
-        if (!playMode)
+        // NOTE FADE COLOR PICKER (single source for notes/glow/particles/keypress)
+        ImGui.SetCursorScreenPos(new(ImGuiUtils.FixedSize(new Vector2(85)).X, CanvasPos.Y + ImGuiUtils.FixedSize(new Vector2(110)).Y));
+        Vector4 fadeColor = ThemeManager.NoteFadeCol;
+        if (ImGui.ColorEdit4("Note Fade Color", ref fadeColor, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoLabel
+            | ImGuiColorEditFlags.NoDragDrop | ImGuiColorEditFlags.NoOptions | ImGuiColorEditFlags.NoAlpha))
         {
-            DrawHandToggleButtons();
+            ThemeManager.SetNoteFadeColor(fadeColor);
         }
+
+        bool fadeColorPopupOpen = ImGui.IsPopupOpen("Note Fade Colorpicker");
+        _leftHandColorPicker = fadeColorPopupOpen;
+        _rightHandColorPicker = fadeColorPopupOpen;
+
+        // Hand L/R toggles removed: single visual style now.
 
         if (CoreSettings.SoundEngine == SoundEngine.SoundFonts)
         {
