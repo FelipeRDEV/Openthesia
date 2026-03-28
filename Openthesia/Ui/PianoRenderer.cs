@@ -237,12 +237,17 @@ public class PianoRenderer
                 if (IOHandle.PressedKeys.Contains(cur_key))
                 {
                     var handColor = IOHandle.GetPressedKeyColor(cur_key);
+                    if (CoreSettings.KeyPressColorMatch)
+                    {
+                        // Black keys should stay visually solid (no alpha fade-through).
+                        handColor.W = 1f;
+                    }
                     var color = CoreSettings.KeyPressColorMatch ? ImGui.GetColorU32(handColor) : _blackPressed;
                     col = color;
                 }
 
                 var offset = IOHandle.PressedKeys.Contains(cur_key) ? 1 : 0;
-                var blackImage = IOHandle.PressedKeys.Contains(cur_key) ? Drawings.CSharpWhite : Drawings.CSharp;
+                var blackImage = Drawings.CSharp;
 
                 draw_list.AddImage(blackImage,
                     new Vector2(P.X + key * Width + Width * 3 / 4, P.Y),

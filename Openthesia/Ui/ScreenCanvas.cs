@@ -45,6 +45,14 @@ public class ScreenCanvas
     private static readonly List<int> _hitLineGlowsToRemove = new();
     private static readonly List<HitLineParticle> _hitLineParticles = new();
     private static uint _hitLineParticleRng = 0x6E624EB7;
+    private const float PreRollSeconds = 3f;
+    private static bool _isPreRollActive;
+    private static float _preRollRemaining;
+    private static float _preRollBaseSeconds;
+    private static bool _queueInitialPreRoll;
+    private static bool _hasResumeAnchor;
+    private static float _resumeAnchorSeconds;
+    private static bool _preRollScrollVisual;
 
     private struct HitLineGlowState
     {
@@ -65,6 +73,50 @@ public class ScreenCanvas
         public float MaxLife;
         public float Size;
     }
+
+    private sealed class ChordGuideMarker
+    {
+        public readonly HashSet<int> PitchClasses = new();
+        public float AttackY;
+        public float StartSeconds;
+        public float LongestLengthSeconds;
+    }
+
+    private readonly struct ChordPattern
+    {
+        public readonly string Suffix;
+        public readonly int[] Intervals;
+        public readonly int Priority;
+
+        public ChordPattern(string suffix, int[] intervals, int priority)
+        {
+            Suffix = suffix;
+            Intervals = intervals;
+            Priority = priority;
+        }
+    }
+
+    private static readonly string[] _pitchClassNames = new[]
+    {
+        "C", "C#", "D", "D#", "E", "F",
+        "F#", "G", "G#", "A", "A#", "B"
+    };
+
+    private static readonly ChordPattern[] _chordPatterns = new[]
+    {
+        new ChordPattern("maj7", new[] { 0, 4, 7, 11 }, 1),
+        new ChordPattern("7", new[] { 0, 4, 7, 10 }, 2),
+        new ChordPattern("m7", new[] { 0, 3, 7, 10 }, 3),
+        new ChordPattern("mMaj7", new[] { 0, 3, 7, 11 }, 4),
+        new ChordPattern("dim7", new[] { 0, 3, 6, 9 }, 5),
+        new ChordPattern("m7b5", new[] { 0, 3, 6, 10 }, 6),
+        new ChordPattern("aug", new[] { 0, 4, 8 }, 7),
+        new ChordPattern("dim", new[] { 0, 3, 6 }, 8),
+        new ChordPattern("sus4", new[] { 0, 5, 7 }, 9),
+        new ChordPattern("sus2", new[] { 0, 2, 7 }, 10),
+        new ChordPattern("m", new[] { 0, 3, 7 }, 11),
+        new ChordPattern("", new[] { 0, 4, 7 }, 12),
+    };
 
     private static void RenderGrid()
     {
@@ -92,6 +144,157 @@ public class ScreenCanvas
     private static float Lerp(float a, float b, float t)
     {
         return a + (b - a) * t;
+    }
+
+    private static void CancelPreRoll()
+    {
+        _isPreRollActive = false;
+        _preRollRemaining = 0f;
+        _preRollScrollVisual = true;
+    }
+
+    private static void BeginPreRoll()
+    {
+        if (MidiPlayer.Playback is null)
+            return;
+
+        float durationSeconds = (float)MidiFileData.MidiFile.GetDuration<MetricTimeSpan>().TotalSeconds;
+        float timelineFromTimer = FallSpeedVal <= 0f ? MidiPlayer.Seconds : MidiPlayer.Timer / (100f * FallSpeedVal);
+        if (!float.IsFinite(timelineFromTimer))
+            timelineFromTimer = MidiPlayer.Seconds;
+
+        float baseSeconds = _hasResumeAnchor ? _resumeAnchorSeconds : timelineFromTimer;
+        _preRollBaseSeconds = Math.Clamp(baseSeconds, 0f, durationSeconds);
+        MidiPlayer.Seconds = _preRollBaseSeconds;
+        _preRollRemaining = PreRollSeconds;
+        _isPreRollActive = true;
+        _preRollScrollVisual = !_hasResumeAnchor;
+        MidiPlayer.IsTimerRunning = false;
+        MidiPlayer.Playback.Stop();
+        MidiPlayer.SoundFontEngine?.StopAllNote(0);
+        _hitLineGlows.Clear();
+        _hitLineParticles.Clear();
+
+        float visualSeconds = _preRollScrollVisual ? (_preRollBaseSeconds - PreRollSeconds) : _preRollBaseSeconds;
+        MidiPlayer.Timer = visualSeconds * 100f * FallSpeedVal;
+    }
+
+    private static float CapturePlaybackSeconds()
+    {
+        if (MidiPlayer.Playback is null)
+            return Math.Max(0f, MidiPlayer.Seconds);
+
+        float captured = MidiPlayer.Seconds;
+        try
+        {
+            captured = (float)MidiPlayer.Playback.GetCurrentTime<MetricTimeSpan>().TotalSeconds;
+        }
+        catch
+        {
+            // Keep the last known timeline value when device time is not available.
+        }
+
+        if (!float.IsFinite(captured))
+            captured = MidiPlayer.Seconds;
+
+        return Math.Max(0f, captured);
+    }
+
+    private static void PausePlaybackAtCurrentPosition(bool stopAllNotes)
+    {
+        if (MidiPlayer.Playback is null)
+            return;
+
+        float durationSeconds = (float)MidiFileData.MidiFile.GetDuration<MetricTimeSpan>().TotalSeconds;
+        float timerSeconds = 0f;
+        if (FallSpeedVal > 0f)
+        {
+            timerSeconds = MidiPlayer.Timer / (100f * FallSpeedVal);
+            if (!float.IsFinite(timerSeconds))
+                timerSeconds = 0f;
+        }
+        float pauseSeconds = Math.Max(CapturePlaybackSeconds(), Math.Max(MidiPlayer.Seconds, timerSeconds));
+        pauseSeconds = Math.Clamp(pauseSeconds, 0f, durationSeconds);
+
+        CancelPreRoll();
+        MidiPlayer.IsTimerRunning = false;
+        MidiPlayer.Playback.Stop();
+        if (stopAllNotes)
+            MidiPlayer.SoundFontEngine?.StopAllNote(0);
+
+        MidiPlayer.Seconds = pauseSeconds;
+        MidiPlayer.Timer = pauseSeconds * 100f * FallSpeedVal;
+        _resumeAnchorSeconds = pauseSeconds;
+        _hasResumeAnchor = true;
+    }
+
+    private static void StartPlaybackAfterPreRoll()
+    {
+        if (MidiPlayer.Playback is null)
+            return;
+
+        long microseconds = (long)(_preRollBaseSeconds * 1_000_000f);
+        MidiPlayer.Playback.MoveToTime(new MetricTimeSpan(microseconds));
+        MidiPlayer.Seconds = _preRollBaseSeconds;
+        MidiPlayer.Timer = _preRollBaseSeconds * 100f * FallSpeedVal;
+        MidiPlayer.Playback.Start();
+        MidiPlayer.StartTimer();
+        _hasResumeAnchor = false;
+        CancelPreRoll();
+    }
+
+    private static void UpdatePreRoll()
+    {
+        if (!_isPreRollActive || MidiPlayer.Playback is null)
+            return;
+
+        float dt = Math.Clamp(ImGui.GetIO().DeltaTime, 0.001f, 0.05f);
+        float speed = Math.Clamp((float)MidiPlayer.Playback.Speed, 0.25f, 4f);
+        _preRollRemaining = Math.Max(0f, _preRollRemaining - dt);
+        if (_preRollScrollVisual)
+            MidiPlayer.Timer += dt * 100f * speed * FallSpeedVal;
+
+        if (_preRollRemaining <= 0f)
+            StartPlaybackAfterPreRoll();
+    }
+
+    private static void DrawPreRollCountdown()
+    {
+        if (!_isPreRollActive)
+            return;
+
+        float remaining = Math.Max(0f, _preRollRemaining);
+        float progress = Math.Clamp((PreRollSeconds - remaining) / PreRollSeconds, 0f, 1f);
+        int countdownValue = Math.Max(1, (int)MathF.Ceiling(remaining));
+        string text = countdownValue.ToString();
+        float pulse = 1f + 0.04f * MathF.Sin(progress * MathF.PI * 8f);
+        float fontSize = MathF.Max(58f, ImGui.GetFontSize() * 3.9f) * pulse;
+        Vector2 center = new(ImGui.GetIO().DisplaySize.X * 0.5f, PianoRenderer.P.Y * 0.18f);
+        Vector2 panelSize = ImGuiUtils.FixedSize(new Vector2(120f, 92f)) * pulse;
+        Vector2 panelMin = center - panelSize * 0.5f;
+        Vector2 panelMax = center + panelSize * 0.5f;
+
+        float textScale = fontSize / MathF.Max(1f, ImGui.GetFontSize());
+        Vector2 textSize = ImGui.CalcTextSize(text) * textScale;
+        Vector2 pos = center - textSize * 0.5f;
+
+        var drawList = ImGui.GetWindowDrawList();
+        Vector4 accent = new(
+            Math.Clamp(ThemeManager.NoteFadeCol.X * 1.4f, 0f, 1f),
+            Math.Clamp(ThemeManager.NoteFadeCol.Y * 1.4f, 0f, 1f),
+            Math.Clamp(ThemeManager.NoteFadeCol.Z * 1.4f, 0f, 1f),
+            0.90f);
+        drawList.AddRectFilled(panelMin, panelMax, ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.58f)), 18f);
+        drawList.AddRect(panelMin, panelMax, ImGui.GetColorU32(accent), 18f, ImDrawFlags.None, 2f);
+        drawList.AddText(ImGui.GetFont(), fontSize, pos + new Vector2(2f, 2f), ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.88f)), text);
+        drawList.AddText(ImGui.GetFont(), fontSize, pos, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.98f)), text);
+    }
+
+    public static void QueueInitialPreRollStart()
+    {
+        _queueInitialPreRoll = true;
+        _hasResumeAnchor = false;
+        _resumeAnchorSeconds = 0f;
     }
     
     private static bool IsNoteEnabled(int index) => true;
@@ -156,21 +359,20 @@ public class ScreenCanvas
         Vector4 rightCol,
         float rounding)
     {
-        // Continuous gradient to avoid visible vertical seams.
-        drawList.AddRectFilledMultiColor(
-            min,
-            max,
-            ImGui.GetColorU32(leftCol),
-            ImGui.GetColorU32(rightCol),
-            ImGui.GetColorU32(rightCol),
-            ImGui.GetColorU32(leftCol));
+        float width = MathF.Max(1f, max.X - min.X);
+        float safeRounding = MathF.Min(rounding, MathF.Max(0f, width * 0.5f - 0.5f));
 
-        // Re-apply rounded corners as an outline layer.
-        if (rounding > 0f)
-        {
-            Vector4 avg = Vector4.Lerp(leftCol, rightCol, 0.5f);
-            drawList.AddRect(min, max, ImGui.GetColorU32(avg), rounding, ImDrawFlags.RoundCornersAll, 1f);
-        }
+        // Solid rounded body avoids center seam artifacts.
+        Vector4 baseCol = Vector4.Lerp(leftCol, rightCol, 0.5f);
+        drawList.AddRectFilled(min, max, ImGui.GetColorU32(baseCol), safeRounding, ImDrawFlags.RoundCornersAll);
+
+        // Stronger/saturated contour as requested.
+        Vector4 border = Vector4.Lerp(leftCol, rightCol, 0.82f);
+        border.X = Math.Clamp(border.X * 1.3f, 0f, 1f);
+        border.Y = Math.Clamp(border.Y * 1.3f, 0f, 1f);
+        border.Z = Math.Clamp(border.Z * 1.3f, 0f, 1f);
+        border.W = Math.Clamp(baseCol.W * 1.1f + 0.2f, 0.35f, 1f);
+        drawList.AddRect(min, max, ImGui.GetColorU32(border), safeRounding, ImDrawFlags.RoundCornersAll, 1.2f);
     }
 
     private static void DrawNoteLabel(ImDrawListPtr drawList, Vector2 min, Vector2 max, int midiNote)
@@ -231,6 +433,132 @@ public class ScreenCanvas
         return (_hitLineParticleRng & 0x00FFFFFF) / 16777216f;
     }
 
+    private static bool TryGetChordName(HashSet<int> pitchClasses, out string chordName)
+    {
+        chordName = string.Empty;
+        if (pitchClasses.Count < 3)
+            return false;
+
+        bool[] active = new bool[12];
+        foreach (int pitchClass in pitchClasses)
+        {
+            active[(pitchClass % 12 + 12) % 12] = true;
+        }
+
+        int bestScore = int.MaxValue;
+        string best = string.Empty;
+        int activeCount = pitchClasses.Count;
+        for (int root = 0; root < 12; root++)
+        {
+            if (!active[root])
+                continue;
+
+            foreach (ChordPattern pattern in _chordPatterns)
+            {
+                if (!TryMatchChordPattern(active, root, pattern, activeCount, out int score))
+                    continue;
+
+                if (score >= bestScore)
+                    continue;
+
+                bestScore = score;
+                best = _pitchClassNames[root] + pattern.Suffix;
+            }
+        }
+
+        if (bestScore == int.MaxValue)
+            return false;
+
+        chordName = best;
+        return true;
+    }
+
+    private static bool TryMatchChordPattern(bool[] active, int root, ChordPattern pattern, int activeCount, out int score)
+    {
+        score = int.MaxValue;
+        bool[] required = new bool[12];
+        for (int i = 0; i < pattern.Intervals.Length; i++)
+        {
+            int target = (root + pattern.Intervals[i]) % 12;
+            required[target] = true;
+            if (!active[target])
+                return false;
+        }
+
+        int extras = 0;
+        for (int i = 0; i < 12; i++)
+        {
+            if (active[i] && !required[i])
+                extras++;
+        }
+
+        // Keep it readable: allow little color tones, ignore overly dense clusters.
+        if (extras > 2)
+            return false;
+
+        int densityPenalty = activeCount > 5 ? (activeCount - 5) * 2 : 0;
+        score = extras * 20 + pattern.Priority + densityPenalty;
+        return true;
+    }
+
+    private static void DrawChordGuideLines(ImDrawListPtr drawList, Dictionary<long, ChordGuideMarker> markers)
+    {
+        if (markers.Count == 0)
+            return;
+
+        const float longChordMinSeconds = 0.42f;
+        List<ChordGuideMarker> ordered = new(markers.Count);
+        foreach (ChordGuideMarker marker in markers.Values)
+        {
+            if (marker.LongestLengthSeconds < longChordMinSeconds || marker.PitchClasses.Count < 3)
+                continue;
+            ordered.Add(marker);
+        }
+
+        if (ordered.Count == 0)
+            return;
+
+        ordered.Sort((a, b) => a.StartSeconds.CompareTo(b.StartSeconds));
+
+        float left = PianoRenderer.P.X;
+        float right = PianoRenderer.P.X + PianoRenderer.Width * 52f;
+        Vector4 baseColor = Vector4.Lerp(ThemeManager.NoteFadeCol, Vector4.One, 0.25f);
+        Vector4 lineColor = new(baseColor.X, baseColor.Y, baseColor.Z, 0.085f);
+        Vector4 textColor = new(baseColor.X, baseColor.Y, baseColor.Z, 0.7f);
+        Vector4 chipBgColor = new(0f, 0f, 0f, 0.24f);
+        float labelFontSize = MathF.Max(10f, ImGui.GetFontSize() * 0.78f);
+        float minY = -8f;
+        float maxY = PianoRenderer.P.Y + 6f;
+
+        string lastChord = string.Empty;
+        float lastChordSecond = float.NegativeInfinity;
+
+        foreach (ChordGuideMarker marker in ordered)
+        {
+            if (marker.AttackY < minY || marker.AttackY > maxY)
+                continue;
+
+            if (!TryGetChordName(marker.PitchClasses, out string chordName))
+                continue;
+
+            if (chordName == lastChord && marker.StartSeconds - lastChordSecond < 0.6f)
+                continue;
+
+            drawList.AddLine(new Vector2(left, marker.AttackY), new Vector2(right, marker.AttackY), ImGui.GetColorU32(lineColor), 1f);
+
+            Vector2 textSize = ImGui.CalcTextSize(chordName);
+            float scale = labelFontSize / MathF.Max(1f, ImGui.GetFontSize());
+            Vector2 scaledTextSize = textSize * scale;
+            Vector2 chipMin = new(right - scaledTextSize.X - 12f, marker.AttackY - scaledTextSize.Y - 3f);
+            Vector2 chipMax = new(right - 4f, marker.AttackY - 1f);
+            drawList.AddRectFilled(chipMin, chipMax, ImGui.GetColorU32(chipBgColor), 4f, ImDrawFlags.RoundCornersAll);
+            drawList.AddText(ImGui.GetFont(), labelFontSize, new Vector2(chipMin.X + 5f, chipMin.Y + 1f), ImGui.GetColorU32(textColor), chordName);
+
+            lastChord = chordName;
+            lastChordSecond = marker.StartSeconds;
+        }
+    }
+
     private static void DrawHitLineConsumeEffect(ImDrawListPtr drawList, float x1, float x2, Vector4 color, float intensity, float verticalScale)
     {
         float lineY = PianoRenderer.P.Y - 1f;
@@ -238,13 +566,13 @@ public class ScreenCanvas
             ? Math.Clamp(color.W, 0.12f, 1f)
             : 1f;
         Vector3 sourceRgb = new(color.X, color.Y, color.Z);
-        Vector3 rgb = Vector3.Lerp(sourceRgb, Vector3.One, 0.34f);
+        Vector3 rgb = Vector3.Lerp(sourceRgb, Vector3.One, 0.5f);
         float width = MathF.Max(6f, x2 - x1);
-        float glowBoost = 1.05f + 0.18f * velScale;
-        float energy = Math.Clamp(intensity * glowBoost, 0.1f, 1.7f);
+        float glowBoost = 1.22f + 0.25f * velScale;
+        float energy = Math.Clamp(intensity * glowBoost, 0.12f, 2.05f);
         float riseScale = Math.Clamp(verticalScale, 0.5f, 1.1f);
         float roundnessBase = Math.Clamp(width * 0.28f, 2f, 6f);
-        Vector3 hot = Vector3.Lerp(rgb, Vector3.One, 0.62f);
+        Vector3 hot = Vector3.Lerp(rgb, Vector3.One, 0.8f);
 
         // Keep horizontal spread very close to key width.
         float corePadX = Math.Clamp(width * 0.012f, 0f, 0.24f);
@@ -263,30 +591,30 @@ public class ScreenCanvas
             new Vector2(x2 + auraPadX + 0.25f, lineY + farAuraDown),
                 ImGui.GetColorU32(new Vector4(rgb, 0f)),
                 ImGui.GetColorU32(new Vector4(rgb, 0f)),
-                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.16f * energy, 0.04f, 0.24f))),
-                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.16f * energy, 0.04f, 0.24f))));
+                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.26f * energy, 0.08f, 0.38f))),
+                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.26f * energy, 0.08f, 0.38f))));
 
         drawList.AddRectFilledMultiColor(
             new Vector2(x1 - auraPadX, lineY - auraUp),
             new Vector2(x2 + auraPadX, lineY + auraDown),
                 ImGui.GetColorU32(new Vector4(rgb, 0f)),
                 ImGui.GetColorU32(new Vector4(rgb, 0f)),
-                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.26f * energy, 0.08f, 0.46f))),
-                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.26f * energy, 0.08f, 0.46f))));
+                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.38f * energy, 0.14f, 0.64f))),
+                ImGui.GetColorU32(new Vector4(rgb, Math.Clamp(0.38f * energy, 0.14f, 0.64f))));
 
         drawList.AddRectFilledMultiColor(
             new Vector2(x1 - corePadX, lineY - upReach),
             new Vector2(x2 + corePadX, lineY + coreDown),
                 ImGui.GetColorU32(new Vector4(hot, 0f)),
                 ImGui.GetColorU32(new Vector4(hot, 0f)),
-                ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.95f * energy, 0.18f, 0.92f))),
-                ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.95f * energy, 0.18f, 0.92f))));
+                ImGui.GetColorU32(new Vector4(hot, Math.Clamp(1.25f * energy, 0.3f, 1f))),
+                ImGui.GetColorU32(new Vector4(hot, Math.Clamp(1.25f * energy, 0.3f, 1f))));
 
         float flashHalfHeight = 1.25f + 0.85f * energy;
         drawList.AddRectFilled(
             new Vector2(x1 - corePadX, lineY - flashHalfHeight),
             new Vector2(x2 + corePadX, lineY + flashHalfHeight),
-            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(0.88f * energy, 0.2f, 0.9f))),
+            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(1.2f * energy, 0.36f, 1f))),
             roundnessBase + 1.2f,
             ImDrawFlags.RoundCornersAll);
 
@@ -294,7 +622,7 @@ public class ScreenCanvas
         drawList.AddLine(
             new Vector2(x1 - corePadX, lineY),
             new Vector2(x2 + corePadX, lineY),
-            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(1.06f * energy, 0.28f, 0.95f))),
+            ImGui.GetColorU32(new Vector4(hot, Math.Clamp(1.35f * energy, 0.5f, 1f))),
             coreThickness);
 
         // Keep only one core stroke to avoid "double glow" look on the hit line.
@@ -638,7 +966,8 @@ public class ScreenCanvas
     {
         var drawList = ImGui.GetWindowDrawList();
 
-        if (MidiPlayer.IsTimerRunning)
+        UpdatePreRoll();
+        if (MidiPlayer.IsTimerRunning && !_isPreRollActive)
         {
             MidiPlayer.Timer += ImGui.GetIO().DeltaTime * 100f * (float)MidiPlayer.Playback.Speed * FallSpeedVal;
         }
@@ -646,10 +975,12 @@ public class ScreenCanvas
         int index = 0;
         var notes = MidiFileData.Notes;
         bool missingNote = false;
+        Dictionary<long, ChordGuideMarker> chordGuideMarkers = new();
         foreach (Note note in notes)
         {
             var time = (float)note.TimeAs<MetricTimeSpan>(MidiFileData.TempoMap).TotalSeconds * FallSpeedVal;
-            var length = (float)note.LengthAs<MetricTimeSpan>(MidiFileData.TempoMap).TotalSeconds * FallSpeedVal;
+            float lengthSeconds = (float)note.LengthAs<MetricTimeSpan>(MidiFileData.TempoMap).TotalSeconds;
+            var length = lengthSeconds * FallSpeedVal;
             var col = GetNoteColor(index, note.NoteNumber);
             
             // color opacity based on note velocity
@@ -826,6 +1157,25 @@ public class ScreenCanvas
                 }
             }
 
+            if (lengthSeconds >= 0.42f)
+            {
+                float attackY = (UpDirection && !IsLearningMode && !IsEditMode) ? py1 : py2;
+                if (!chordGuideMarkers.TryGetValue(note.Time, out var marker))
+                {
+                    marker = new ChordGuideMarker
+                    {
+                        AttackY = attackY,
+                        StartSeconds = time / MathF.Max(FallSpeedVal, 0.0001f),
+                        LongestLengthSeconds = lengthSeconds
+                    };
+                    chordGuideMarkers[note.Time] = marker;
+                }
+
+                marker.AttackY = attackY;
+                marker.LongestLengthSeconds = MathF.Max(marker.LongestLengthSeconds, lengthSeconds);
+                marker.PitchClasses.Add(note.NoteNumber % 12);
+            }
+
             if (note.NoteName.ToString().EndsWith("Sharp"))
             {
                 float x1 = PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4;
@@ -870,7 +1220,8 @@ public class ScreenCanvas
                     new Vector2(x2, py2),
                     note.NoteNumber);
 
-                RegisterHitLineNoteEffect(index, py1, py2, x1, x2, col);
+                if (!_isPreRollActive)
+                    RegisterHitLineNoteEffect(index, py1, py2, x1, x2, col);
             }
             else
             {
@@ -915,17 +1266,19 @@ public class ScreenCanvas
                     new Vector2(x2, py2),
                     note.NoteNumber);
 
-                RegisterHitLineNoteEffect(index, py1, py2, x1, x2, col);
+                if (!_isPreRollActive)
+                    RegisterHitLineNoteEffect(index, py1, py2, x1, x2, col);
             }
             index++;
         }
 
+        DrawChordGuideLines(drawList, chordGuideMarkers);
         DrawHitLineTransientEffects(drawList);
 
         if (IsLearningMode && !MidiPlayer.IsTimerRunning && !missingNote)
         {
-            MidiPlayer.StartTimer();
-            MidiPlayer.Playback.Start();
+            if (!_isPreRollActive)
+                BeginPreRoll();
         }
     }
 
@@ -950,6 +1303,10 @@ public class ScreenCanvas
         var panButton = IsEditMode ? ImGuiMouseButton.Middle : ImGuiMouseButton.Right;
         if (ImGui.IsMouseHoveringRect(Vector2.Zero, new(ImGui.GetIO().DisplaySize.X, PianoRenderer.P.Y)) && ImGui.IsMouseDown(panButton))
         {
+            if (_isPreRollActive)
+                CancelPreRoll();
+            _hasResumeAnchor = false;
+
             ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeNS);
             const float interpolationFactor = 0.05f;
             const float decelerationFactor = 0.75f;
@@ -967,14 +1324,13 @@ public class ScreenCanvas
 
         if (ImGui.IsKeyPressed(ImGuiKey.Space, false))
         {
-            MidiPlayer.IsTimerRunning = !MidiPlayer.IsTimerRunning;
-            if (MidiPlayer.IsTimerRunning)
+            if (MidiPlayer.IsTimerRunning || _isPreRollActive)
             {
-                MidiPlayer.Playback.Start();
+                PausePlaybackAtCurrentPosition(true);
             }
             else
             {
-                MidiPlayer.Playback.Stop();
+                BeginPreRoll();
             }
         }
 
@@ -990,6 +1346,10 @@ public class ScreenCanvas
 
         if (ImGui.IsKeyPressed(ImGuiKey.RightArrow))
         {
+            if (_isPreRollActive)
+                CancelPreRoll();
+            _hasResumeAnchor = false;
+
             float n = ImGui.GetIO().KeyCtrl ? 0.1f : 1f;
             var newTime = Math.Clamp(MidiPlayer.Seconds + n, 0, (float)MidiFileData.MidiFile.GetDuration<MetricTimeSpan>().TotalSeconds);
             long ms = (long)(newTime * 1000000);
@@ -999,6 +1359,10 @@ public class ScreenCanvas
 
         if (ImGui.IsKeyPressed(ImGuiKey.LeftArrow))
         {
+            if (_isPreRollActive)
+                CancelPreRoll();
+            _hasResumeAnchor = false;
+
             float n = ImGui.GetIO().KeyCtrl ? 0.1f : 1f;
             var newTime = Math.Clamp(MidiPlayer.Seconds - n, 0, (float)MidiFileData.MidiFile.GetDuration<MetricTimeSpan>().TotalSeconds);
             long ms = (long)(newTime * 1000000);
@@ -1060,6 +1424,15 @@ public class ScreenCanvas
         using (AutoFont font22 = new(FontController.GetFontOfSize(22)))
         {
             CanvasPos = ImGui.GetWindowPos();
+
+            if (!playMode && _queueInitialPreRoll && MidiPlayer.Playback is not null)
+            {
+                _queueInitialPreRoll = false;
+                MidiPlayer.Seconds = 0f;
+                MidiPlayer.Timer = 0f;
+                BeginPreRoll();
+            }
+
             RenderGrid();
 
             if (CoreSettings.FpsCounter)
@@ -1074,6 +1447,7 @@ public class ScreenCanvas
             else
                 DrawPlaybackNotes();
 
+            DrawPreRollCountdown();
             GetInputs();
 
             var showTopBar = ImGui.IsMouseHoveringRect(Vector2.Zero, new(ImGui.GetIO().DisplaySize.X, 300));
@@ -1125,6 +1499,10 @@ public class ScreenCanvas
         if (ImGui.SliderFloat("##Progress slider", ref MidiPlayer.Seconds, 0, (float)MidiFileData.MidiFile.GetDuration<MetricTimeSpan>().TotalSeconds, "%.1f",
             ImGuiSliderFlags.NoRoundToFormat | ImGuiSliderFlags.AlwaysClamp | ImGuiSliderFlags.NoInput))
         {
+            if (_isPreRollActive)
+                CancelPreRoll();
+            _hasResumeAnchor = false;
+
             long ms = (long)(MidiPlayer.Seconds * 1000000);
             MidiPlayer.Playback.MoveToTime(new MetricTimeSpan(ms));
             MidiPlayer.Timer = MidiPlayer.Seconds * 100 * FallSpeedVal;
@@ -1154,31 +1532,31 @@ public class ScreenCanvas
         ImGui.SetNextWindowPos(new Vector2(ImGui.GetIO().DisplaySize.X / 2 - ImGuiUtils.FixedSize(new Vector2(110)).X, CanvasPos.Y + ImGuiUtils.FixedSize(new Vector2(50)).Y));
         if (ImGui.BeginChild("Player controls", ImGuiUtils.FixedSize(new Vector2(220, 50)), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse))
         {
-            var playColor = !MidiPlayer.IsTimerRunning ? Vector4.One : ThemeManager.RightHandCol;
+            var playColor = (!MidiPlayer.IsTimerRunning && !_isPreRollActive) ? Vector4.One : ThemeManager.RightHandCol;
 
             // PLAY BUTTON
             ImGui.PushFont(FontController.Font16_Icon16);
             ImGuiTheme.Style.Colors[(int)ImGuiCol.Text] = playColor;
             if (ImGui.Button($"{FontAwesome6.Play}", new(ImGuiUtils.FixedSize(new Vector2(50)).X, ImGui.GetWindowSize().Y)))
             {
-                MidiPlayer.Playback.Start();
-                MidiPlayer.StartTimer();
+                BeginPreRoll();
             }
             ImGuiTheme.Style.Colors[(int)ImGuiCol.Text] = Vector4.One;
-            var pauseColor = MidiPlayer.IsTimerRunning ? Vector4.One : new(0.70f, 0.22f, 0.22f, 1);
+            var pauseColor = (MidiPlayer.IsTimerRunning || _isPreRollActive) ? Vector4.One : new(0.70f, 0.22f, 0.22f, 1);
             ImGui.SameLine();
             // PAUSE BUTTON
             ImGuiTheme.Style.Colors[(int)ImGuiCol.Text] = pauseColor;
             if (ImGui.Button($"{FontAwesome6.Pause}", new(ImGuiUtils.FixedSize(new Vector2(50)).X, ImGui.GetWindowSize().Y)))
             {
-                MidiPlayer.Playback.Stop();
-                MidiPlayer.IsTimerRunning = false;
+                PausePlaybackAtCurrentPosition(true);
             }
             ImGuiTheme.Style.Colors[(int)ImGuiCol.Text] = Vector4.One;
             ImGui.SameLine();
             // STOP BUTTON
             if (ImGui.Button($"{FontAwesome6.Stop}", new(ImGuiUtils.FixedSize(new Vector2(50)).X, ImGui.GetWindowSize().Y)) || ImGui.IsKeyPressed(ImGuiKey.Backspace, false))
             {
+                CancelPreRoll();
+                _hasResumeAnchor = false;
                 MidiPlayer.SoundFontEngine?.StopAllNote(0);
                 MidiPlayer.Playback.Stop();
                 MidiPlayer.Playback.MoveToStart();
@@ -1197,11 +1575,12 @@ public class ScreenCanvas
                         ScreenRecorder.StartRecording();
                         if (CoreSettings.VideoRecStartsPlayback)
                         {
-                            MidiPlayer.Playback.Start();
-                            MidiPlayer.StartTimer();
+                            BeginPreRoll();
                         }
                         break;
                     case RecorderStatus.Recording:
+                        CancelPreRoll();
+                        _hasResumeAnchor = false;
                         ScreenRecorder.EndRecording();
                         MidiPlayer.SoundFontEngine?.StopAllNote(0);
                         MidiPlayer.Playback.Stop();
@@ -1360,6 +1739,8 @@ public class ScreenCanvas
         ImGui.SetCursorScreenPos(new(ImGuiUtils.FixedSize(new Vector2(25)).X, CanvasPos.Y + ImGuiUtils.FixedSize(new Vector2(50)).Y));
         if (ImGui.Button(FontAwesome6.ArrowLeftLong, ImGuiUtils.FixedSize(new Vector2(100, 50))) || ImGui.IsKeyPressed(ImGuiKey.Escape, false))
         {
+            CancelPreRoll();
+            _hasResumeAnchor = false;
             MidiPlayer.Playback?.Stop();
             MidiPlayer.Playback?.MoveToStart();
             MidiPlayer.IsTimerRunning = false;

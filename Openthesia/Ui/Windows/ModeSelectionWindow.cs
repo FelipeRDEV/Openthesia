@@ -3,6 +3,7 @@ using ImGuiNET;
 using Openthesia.Core;
 using Openthesia.Core.Midi;
 using Openthesia.Settings;
+using Openthesia.Ui;
 using Openthesia.Ui.Helpers;
 using System.Numerics;
 
@@ -105,6 +106,14 @@ public class ModeSelectionWindow : ImGuiWindow
     {
         ScreenCanvasControls.SetLearningMode(learningMode);
         ScreenCanvasControls.SetEditMode(editMode);
+
+        MidiPlayer.SoundFontEngine?.StopAllNote(0);
+        MidiPlayer.Playback?.Stop();
+        MidiPlayer.Playback?.MoveToStart();
+        MidiPlayer.IsTimerRunning = false;
+        MidiPlayer.Seconds = 0f;
+        MidiPlayer.Timer = 0f;
+        ScreenCanvas.QueueInitialPreRollStart();
 
         LeftRightData.S_IsRightNote = Enumerable.Repeat(true, MidiFileData.Notes.Count()).ToList();
         // Always classify hands automatically using the conventional heuristic.
