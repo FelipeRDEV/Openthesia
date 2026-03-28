@@ -81,16 +81,6 @@ public static class MidiEditing
             LeftRightData.S_IsRightNote = Enumerable.Repeat(true, indexedNotes.Count).ToList();
         }
 
-        List<int> notesSorted = indexedNotes
-            .Select(x => (int)x.Note.NoteNumber)
-            .OrderBy(n => n)
-            .ToList();
-
-        float medianPitch = notesSorted[notesSorted.Count / 2];
-        float splitPitch = Math.Clamp(medianPitch, 55f, 67f);
-
-        int? lastLeft = null;
-        int? lastRight = null;
         int groupStart = 0;
 
         while (groupStart < indexedNotes.Count)
@@ -104,7 +94,7 @@ public static class MidiEditing
             }
 
             var group = indexedNotes.GetRange(groupStart, groupEnd - groupStart);
-            AssignGroupHands(group, splitPitch, ref lastLeft, ref lastRight);
+            AssignGroupHandsByCPosition(group);
 
             groupStart = groupEnd;
         }
@@ -127,82 +117,17 @@ public static class MidiEditing
         }
     }
 
-    private static void AssignGroupHands(
-        List<(Melanchall.DryWetMidi.Interaction.Note Note, int Index)> group,
-        float splitPitch,
-        ref int? lastLeft,
-        ref int? lastRight)
+    private static void AssignGroupHandsByCPosition(
+        List<(Melanchall.DryWetMidi.Interaction.Note Note, int Index)> group)
     {
-        if (group.Count == 1)
+        // "C Position" convention:
+        // Left hand around/below B3, right hand from Middle C (C4) and above.
+        const int middleC = 60;
+        foreach (var entry in group)
         {
-            AssignSingle(group[0], splitPitch, ref lastLeft, ref lastRight);
-            return;
+            int midiNote = entry.Note.NoteNumber;
+            bool isRight = midiNote >= middleC;
+            LeftRightData.S_IsRightNote[entry.Index] = isRight;
         }
-
-        int middle = group.Count / 2;
-        for (int i = 0; i < group.Count; i++)
-        {
-            int midiNote = group[i].Note.NoteNumber;
-            bool isRight;
-
-            if (group.Count % 2 == 0)
-            {
-                isRight = i >= middle;
-            }
-            else if (i < middle)
-            {
-                isRight = false;
-            }
-            else if (i > middle)
-            {
-                isRight = true;
-            }
-            else
-            {
-                isRight = ChooseClosestHand(midiNote, splitPitch, lastLeft, lastRight);
-            }
-
-            LeftRightData.S_IsRightNote[group[i].Index] = isRight;
-            if (isRight)
-                lastRight = midiNote;
-            else
-                lastLeft = midiNote;
-        }
-    }
-
-    private static void AssignSingle(
-        (Melanchall.DryWetMidi.Interaction.Note Note, int Index) entry,
-        float splitPitch,
-        ref int? lastLeft,
-        ref int? lastRight)
-    {
-        int midiNote = entry.Note.NoteNumber;
-        bool isRight = ChooseClosestHand(midiNote, splitPitch, lastLeft, lastRight);
-        LeftRightData.S_IsRightNote[entry.Index] = isRight;
-
-        if (isRight)
-            lastRight = midiNote;
-        else
-            lastLeft = midiNote;
-    }
-
-    private static bool ChooseClosestHand(int midiNote, float splitPitch, int? lastLeft, int? lastRight)
-    {
-        float leftAnchor = lastLeft ?? (splitPitch - 7f);
-        float rightAnchor = lastRight ?? (splitPitch + 7f);
-
-        float leftScore = MathF.Abs(midiNote - leftAnchor);
-        float rightScore = MathF.Abs(midiNote - rightAnchor);
-
-        if (midiNote > splitPitch)
-        {
-            leftScore += (midiNote - splitPitch) * 1.5f;
-        }
-        else if (midiNote < splitPitch)
-        {
-            rightScore += (splitPitch - midiNote) * 1.5f;
-        }
-
-        return rightScore <= leftScore;
     }
 }

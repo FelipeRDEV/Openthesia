@@ -1,16 +1,19 @@
-﻿using Melanchall.DryWetMidi.Common;
+using Melanchall.DryWetMidi.Common;
 using Melanchall.DryWetMidi.Core;
+using Melanchall.DryWetMidi.Interaction;
 using Melanchall.DryWetMidi.Multimedia;
 using Openthesia.Core.Midi;
 using Openthesia.Core.Plugins;
 using Openthesia.Settings;
 using Openthesia.Ui;
+using System.Numerics;
 
 namespace Openthesia.Core;
 
 public static class IOHandle
 {
     public static List<int> PressedKeys { get; private set; } = new();
+    private static Dictionary<int, Stack<bool>> _pressedKeyHands = new();
 
     public static List<NoteRect> NoteRects = new();
 
@@ -30,7 +33,17 @@ public static class IOHandle
         public float FinalTime;
     }
 
-    private static void OnKeyPressed(SevenBitNumber noteNumber, SevenBitNumber velocity, bool isBlack)
+    public static Vector4 GetPressedKeyColor(int noteNumber)
+    {
+        if (_pressedKeyHands.TryGetValue(noteNumber, out var handStack) && handStack.Count > 0)
+        {
+            return handStack.Peek() ? ThemeManager.RightHandCol : ThemeManager.LeftHandCol;
+        }
+
+        return ThemeManager.RightHandCol;
+    }
+
+    private static void OnKeyPressed(SevenBitNumber noteNumber, SevenBitNumber velocity, bool isBlack, bool? isRightHand)
     {
         // Check if sustain pedal is active
         if (_sustainPedalActive)
@@ -54,6 +67,14 @@ public static class IOHandle
 
         MidiPlayer.SoundFontEngine?.PlayNote(0, noteNumber, velocity);
         PressedKeys.Add(noteNumber);
+
+        if (!_pressedKeyHands.TryGetValue(noteNumber, out var handStack))
+        {
+            handStack = new Stack<bool>();
+            _pressedKeyHands[noteNumber] = handStack;
+        }
+
+        handStack.Push(isRightHand ?? true);
     }
 
     private static void OnKeyReleased(SevenBitNumber noteNumber)
@@ -66,25 +87,34 @@ public static class IOHandle
         else
         {
             // If sustain pedal is not active, stop the note immediately
-            //MidiPlayer.RealTimeSoundFontPlayer.Synthesizer.ProcessMidiMessage(0, 128, noteNumber, ev.Velocity);
             MidiPlayer.SoundFontEngine?.StopNote(0, noteNumber);
         }
 
         if (WindowsManager.Window == Enums.Windows.PlayMode)
         {
             int index = NoteRects.FindIndex(x => x.KeyNum == noteNumber && !x.WasReleased);
-            var n = NoteRects[index];
-            //var n = NoteRects.Find(x => x.KeyNum == noteNumber && !x.WasReleased);
-            //var n = NoteRects[NoteRects.Count - 1];
-            n.WasReleased = true;
-            n.FinalTime = n.Time;
-            NoteRects[index] = n;
+            if (index >= 0)
+            {
+                var n = NoteRects[index];
+                n.WasReleased = true;
+                n.FinalTime = n.Time;
+                NoteRects[index] = n;
+            }
         }
 
         PressedKeys.Remove(noteNumber);
+
+        if (_pressedKeyHands.TryGetValue(noteNumber, out var handStack))
+        {
+            if (handStack.Count > 0)
+                handStack.Pop();
+
+            if (handStack.Count == 0)
+                _pressedKeyHands.Remove(noteNumber);
+        }
     }
 
-    private static void OnNoteOn(NoteOnEvent ev)
+    private static void OnNoteOn(NoteOnEvent ev, bool? isRightHand = null)
     {
         SevenBitNumber velocity = ev.Velocity;
         if (CoreSettings.VelocityZeroIsNoteOff && velocity == 0)
@@ -94,7 +124,7 @@ public static class IOHandle
         else
         {
             bool isBlack = ev.GetNoteName().ToString().EndsWith("Sharp");
-            OnKeyPressed(ev.NoteNumber, velocity, isBlack);
+            OnKeyPressed(ev.NoteNumber, velocity, isBlack, isRightHand);
         }
     }
 
@@ -119,6 +149,28 @@ public static class IOHandle
         _sustainedNotes.Clear();
     }
 
+    private static bool ResolveHandByCPosition(SevenBitNumber noteNumber)
+    {
+        // C Position convention: Middle C (C4=60) and above => right hand.
+        return noteNumber >= 60;
+    }
+
+    private static bool ResolveHandFromMetadata(object metadata, SevenBitNumber noteNumber)
+    {
+        if (metadata is Note note)
+        {
+            string key = $"{note.NoteNumber}_{note.Time}";
+            if (LeftRightData.S_NoteIndexMap.TryGetValue(key, out var indices) && indices.Count > 0)
+            {
+                int idx = indices[0];
+                if (idx >= 0 && idx < LeftRightData.S_IsRightNote.Count)
+                    return LeftRightData.S_IsRightNote[idx];
+            }
+        }
+
+        return ResolveHandByCPosition(noteNumber);
+    }
+
     public static void OnEventReceived(object sender, MidiEventReceivedEventArgs e)
     {
         var eType = e.Event.EventType;
@@ -131,7 +183,7 @@ public static class IOHandle
         switch (eType)
         {
             case MidiEventType.NoteOn:
-                OnNoteOn((NoteOnEvent)e.Event);
+                OnNoteOn((NoteOnEvent)e.Event, null);
                 break;
             case MidiEventType.NoteOff:
                 OnNoteOff((NoteOffEvent)e.Event);
@@ -169,7 +221,9 @@ public static class IOHandle
         switch (eType)
         {
             case MidiEventType.NoteOn:
-                OnNoteOn((NoteOnEvent)e.Event);
+                var noteOn = (NoteOnEvent)e.Event;
+                bool isRightHand = ResolveHandFromMetadata(e.Metadata, noteOn.NoteNumber);
+                OnNoteOn(noteOn, isRightHand);
                 break;
             case MidiEventType.NoteOff:
                 OnNoteOff((NoteOffEvent)e.Event);

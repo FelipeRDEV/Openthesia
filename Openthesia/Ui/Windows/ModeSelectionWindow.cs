@@ -107,10 +107,8 @@ public class ModeSelectionWindow : ImGuiWindow
         ScreenCanvasControls.SetEditMode(editMode);
 
         LeftRightData.S_IsRightNote = Enumerable.Repeat(true, MidiFileData.Notes.Count()).ToList();
-        if (!MidiEditing.ReadData())
-        {
-            MidiEditing.AutoAssignHands();
-        }
+        // Always classify hands automatically using the conventional heuristic.
+        MidiEditing.AutoAssignHands();
 
         MidiEditing.RebuildNoteIndexMap();
 

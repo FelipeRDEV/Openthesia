@@ -32,6 +32,49 @@ public class PianoRenderer
         drawList.AddText(ImGui.GetFont(), fontSize, pos, color, text);
     }
 
+    private static Vector3 GetVisibleWhitePressedRgb(Vector4 handColor)
+    {
+        Vector3 rgb = new(handColor.X, handColor.Y, handColor.Z);
+        float max = MathF.Max(rgb.X, MathF.Max(rgb.Y, rgb.Z));
+        float min = MathF.Min(rgb.X, MathF.Min(rgb.Y, rgb.Z));
+        float saturation = max - min;
+
+        // On white keys, very light colors and low-saturation colors need stronger contrast.
+        if (saturation < 0.15f)
+        {
+            float luminance = rgb.X * 0.2126f + rgb.Y * 0.7152f + rgb.Z * 0.0722f;
+            float targetGray = luminance > 0.62f ? 0.44f : 0.62f;
+            rgb = new Vector3(targetGray, targetGray, targetGray);
+        }
+        else if (max > 0.75f)
+        {
+            rgb *= 0.72f;
+        }
+
+        rgb = Vector3.Clamp(rgb, new Vector3(0.2f), new Vector3(0.88f));
+        return rgb;
+    }
+
+    private static uint GetVisibleWhitePressedColor(Vector4 handColor)
+    {
+        Vector3 rgb = GetVisibleWhitePressedRgb(handColor);
+        return ImGui.GetColorU32(new Vector4(rgb, 1f));
+    }
+
+    private static void DrawWhiteKeyPressedOverlay(ImDrawListPtr drawList, Vector2 min, Vector2 max, Vector4 handColor)
+    {
+        Vector3 rgb = GetVisibleWhitePressedRgb(handColor);
+        float maxChannel = MathF.Max(rgb.X, MathF.Max(rgb.Y, rgb.Z));
+        float minChannel = MathF.Min(rgb.X, MathF.Min(rgb.Y, rgb.Z));
+        float saturation = maxChannel - minChannel;
+
+        float fillAlpha = saturation < 0.15f ? 0.6f : 0.45f;
+        float borderAlpha = saturation < 0.15f ? 1f : 0.85f;
+
+        drawList.AddRectFilled(min, max, ImGui.GetColorU32(new Vector4(rgb, fillAlpha)), 5, ImDrawFlags.RoundCornersBottom);
+        drawList.AddRect(min, max, ImGui.GetColorU32(new Vector4(rgb, borderAlpha)), 5, ImDrawFlags.RoundCornersBottom, 1.6f);
+    }
+
     private static bool TryGetFittedTextSize(string text, float maxWidth, float maxHeight, out float fontSize, out Vector2 textSize)
     {
         const float minFontSize = 6f;
@@ -122,7 +165,8 @@ public class PianoRenderer
 
             if (IOHandle.PressedKeys.Contains(cur_key))
             {
-                var color = CoreSettings.KeyPressColorMatch ? ImGui.GetColorU32(ThemeManager.RightHandCol) : _whitePressed;
+                var handColor = IOHandle.GetPressedKeyColor(cur_key);
+                var color = CoreSettings.KeyPressColorMatch ? GetVisibleWhitePressedColor(handColor) : _whitePressed;
                 col = color;
             }
 
@@ -131,6 +175,14 @@ public class PianoRenderer
             draw_list.AddImageRounded(Drawings.C,
                 new Vector2(P.X + key * Width, P.Y) + new Vector2(offset, 0),
                 new Vector2(P.X + key * Width + Width, P.Y + Height) + new Vector2(offset, 0), Vector2.Zero, Vector2.One, col, 5, ImDrawFlags.RoundCornersBottom);
+
+            if (IOHandle.PressedKeys.Contains(cur_key) && CoreSettings.KeyPressColorMatch)
+            {
+                var handColor = IOHandle.GetPressedKeyColor(cur_key);
+                Vector2 keyMin = new(P.X + key * Width + offset, P.Y);
+                Vector2 keyMax = new(P.X + key * Width + Width + offset, P.Y + Height);
+                DrawWhiteKeyPressedOverlay(draw_list, keyMin, keyMax, handColor);
+            }
 
             if (WhiteNoteToKey.Count < 52)
                 WhiteNoteToKey.Add((SevenBitNumber)cur_key, key);
@@ -184,8 +236,8 @@ public class PianoRenderer
 
                 if (IOHandle.PressedKeys.Contains(cur_key))
                 {
-                    var v3 = new Vector3(ThemeManager.RightHandCol.X, ThemeManager.RightHandCol.Y, ThemeManager.RightHandCol.Z);
-                    var color = CoreSettings.KeyPressColorMatch ? ImGui.GetColorU32(new Vector4(v3, 1)) : _blackPressed;
+                    var handColor = IOHandle.GetPressedKeyColor(cur_key);
+                    var color = CoreSettings.KeyPressColorMatch ? ImGui.GetColorU32(handColor) : _blackPressed;
                     col = color;
                 }
 
