@@ -14,6 +14,10 @@ public class PianoRenderer
     static uint _white = ImGui.GetColorU32(ImGuiTheme.HtmlToVec4("#FFFFFF"));
     static uint _whitePressed = ImGui.GetColorU32(ImGuiTheme.HtmlToVec4("#888888"));
     static uint _blackPressed = ImGui.GetColorU32(ImGuiTheme.HtmlToVec4("#555555"));
+    static uint _whiteKeyLabel = ImGui.GetColorU32(ImGuiTheme.HtmlToVec4("#4C4C4C"));
+    static uint _blackKeyLabel = ImGui.GetColorU32(ImGuiTheme.HtmlToVec4("#F2F2F2"));
+    static uint _labelLightShadow = ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.65f));
+    static uint _labelDarkShadow = ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.85f));
 
     public static float Width;
     public static float Height;
@@ -21,6 +25,42 @@ public class PianoRenderer
 
     public static Dictionary<SevenBitNumber, int> WhiteNoteToKey = new();
     public static Dictionary<SevenBitNumber, int> BlackNoteToKey = new();
+
+    private static void DrawKeyLabel(ImDrawListPtr drawList, Vector2 pos, string text, uint color, uint shadowColor, float fontSize)
+    {
+        drawList.AddText(ImGui.GetFont(), fontSize, pos + new Vector2(1, 1), shadowColor, text);
+        drawList.AddText(ImGui.GetFont(), fontSize, pos, color, text);
+    }
+
+    private static bool TryGetFittedTextSize(string text, float maxWidth, float maxHeight, out float fontSize, out Vector2 textSize)
+    {
+        const float minFontSize = 6f;
+        float baseFontSize = ImGui.GetFontSize();
+        Vector2 baseTextSize = ImGui.CalcTextSize(text);
+
+        if (baseTextSize.X <= 0f || baseTextSize.Y <= 0f || baseFontSize <= 0f)
+        {
+            fontSize = 0f;
+            textSize = Vector2.Zero;
+            return false;
+        }
+
+        float widthScale = maxWidth / baseTextSize.X;
+        float heightScale = maxHeight / baseTextSize.Y;
+        float scale = MathF.Min(1f, MathF.Min(widthScale, heightScale));
+
+        if (scale <= 0f)
+        {
+            fontSize = 0f;
+            textSize = Vector2.Zero;
+            return false;
+        }
+
+        fontSize = MathF.Max(minFontSize, baseFontSize * scale);
+        float realScale = fontSize / baseFontSize;
+        textSize = baseTextSize * realScale;
+        return true;
+    }
 
     public static void RenderKeyboard()
     {
@@ -56,7 +96,6 @@ public class PianoRenderer
         }
 
         cur_key = 21;
-        int cCount = 1;
         for (int key = 0; key < 52; key++)
         {
             uint col = _white;
@@ -96,13 +135,16 @@ public class PianoRenderer
             if (WhiteNoteToKey.Count < 52)
                 WhiteNoteToKey.Add((SevenBitNumber)cur_key, key);
 
-            if (key % 7 == 1)
+            string whiteNoteLabel = KeysUtils.GetMidiNoteLabel(cur_key);
+            if (!TryGetFittedTextSize(whiteNoteLabel, Width - 4f, Height - 16f, out float whiteFontSize, out Vector2 whiteTextSize))
             {
-                var text = $"C{cCount}";
-                ImGui.GetForegroundDrawList().AddText(new(P.X + key * Width + Width + (Width / 2 - ImGui.CalcTextSize(text).X / 2),
-                    P.Y + Height - 25 * FontController.DSF), _black, text);
-                cCount++;
+                whiteFontSize = ImGui.GetFontSize();
+                whiteTextSize = ImGui.CalcTextSize(whiteNoteLabel);
             }
+            Vector2 whiteTextPos = new(
+                P.X + key * Width + Width / 2 - whiteTextSize.X / 2 + offset,
+                P.Y + Height - whiteTextSize.Y - 14 * FontController.DSF);
+            DrawKeyLabel(draw_list, whiteTextPos, whiteNoteLabel, _whiteKeyLabel, _labelLightShadow, whiteFontSize);
 
             cur_key++;
             if (KeysUtils.HasBlack(key))
@@ -153,6 +195,22 @@ public class PianoRenderer
                 draw_list.AddImage(blackImage,
                     new Vector2(P.X + key * Width + Width * 3 / 4, P.Y),
                     new Vector2(P.X + key * Width + Width * 5 / 4 + 1, P.Y + Height / 1.5f) + new Vector2(offset), Vector2.Zero, Vector2.One, col);
+
+                string blackNoteLabel = KeysUtils.GetMidiNoteLabel(cur_key);
+                float blackMinX = P.X + key * Width + Width * 3 / 4;
+                float blackMaxX = P.X + key * Width + Width * 5 / 4 + 1;
+                float blackBoxWidth = blackMaxX - blackMinX - 2f;
+                float blackBoxHeight = Height / 1.5f - 8f;
+                if (!TryGetFittedTextSize(blackNoteLabel, blackBoxWidth, blackBoxHeight, out float blackFontSize, out Vector2 blackTextSize))
+                {
+                    blackFontSize = ImGui.GetFontSize();
+                    blackTextSize = ImGui.CalcTextSize(blackNoteLabel);
+                }
+
+                Vector2 blackTextPos = new(
+                    blackMinX + (blackMaxX - blackMinX - blackTextSize.X) / 2 + offset,
+                    P.Y + Height / 1.5f - blackTextSize.Y - 6 * FontController.DSF);
+                DrawKeyLabel(draw_list, blackTextPos, blackNoteLabel, _blackKeyLabel, _labelDarkShadow, blackFontSize);
 
                 cur_key += 2;
             }

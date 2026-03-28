@@ -1,5 +1,6 @@
-﻿using MeltySynth;
+using MeltySynth;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 using Openthesia.Core.Midi;
 using Openthesia.Enums;
 using Openthesia.Settings;
@@ -14,6 +15,8 @@ public class SoundFontPlayer
 
     private MidiSampleProvider _midiSampleProvider;
     public MidiSampleProvider MidiSampleProvider => _midiSampleProvider;
+
+    private VolumeSampleProvider _volumeSampleProvider;
 
     private WaveOutEvent _waveOut;
     public WaveOutEvent WaveOut => _waveOut;
@@ -53,6 +56,10 @@ public class SoundFontPlayer
         _synthesizer = new Synthesizer(soundFont, settings);
 
         _midiSampleProvider = new MidiSampleProvider(_synthesizer);
+        _volumeSampleProvider = new VolumeSampleProvider(_midiSampleProvider)
+        {
+            Volume = CoreSettings.MasterVolume
+        };
 
         if (AudioDriverManager.AudioDriverType == AudioDriverTypes.WaveOut)
         {
@@ -61,7 +68,7 @@ public class SoundFontPlayer
 
             _waveOut = new WaveOutEvent();
             _waveOut.DesiredLatency = CoreSettings.WaveOutLatency;
-            _waveOut.Init(_midiSampleProvider);
+            _waveOut.Init(_volumeSampleProvider);
             _waveOut.Play();
         }
         else if (AudioDriverManager.AudioDriverType == AudioDriverTypes.ASIO)
@@ -70,7 +77,7 @@ public class SoundFontPlayer
             _waveOut?.Dispose();
 
             _asioOut = new AsioOut(AudioDriverManager.SelectedAsioDriverName);
-            _asioOut.Init(_midiSampleProvider);
+            _asioOut.Init(_volumeSampleProvider);
             _asioOut.Play();
         }
     }
@@ -108,7 +115,7 @@ public class SoundFontPlayer
         }
 
         _waveOut.DesiredLatency = newLatency;
-        _waveOut.Init(_midiSampleProvider);
+        _waveOut.Init(_volumeSampleProvider);
         _waveOut.Play();
     }
 
@@ -116,6 +123,14 @@ public class SoundFontPlayer
     {
         MidiPlayer.SoundFontEngine = new SoundFontPlayer(soundFontPath, sampleRate);
         _activeSoundFont = Path.GetFileNameWithoutExtension(soundFontPath);
+    }
+
+    public void SetVolume(float volume)
+    {
+        if (_volumeSampleProvider != null)
+        {
+            _volumeSampleProvider.Volume = Math.Clamp(volume, 0f, 10f);
+        }
     }
 
     public void PlayNote(int channel, int noteNumber, int velocity)

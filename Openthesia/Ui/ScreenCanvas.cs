@@ -90,6 +90,89 @@ public class ScreenCanvas
         return ImGui.GetColorU32(color);
     }
 
+    private static void DrawNoteLabel(ImDrawListPtr drawList, Vector2 min, Vector2 max, int midiNote)
+    {
+        string noteLabel = KeysUtils.GetMidiNoteLabel(midiNote);
+        float maxWidth = max.X - min.X - 2f;
+        float maxHeight = max.Y - min.Y - 4f;
+        if (maxWidth <= 2f || maxHeight <= 2f)
+            return;
+
+        if (!TryGetFittedTextSize(noteLabel, maxWidth, maxHeight, out float fontSize, out Vector2 textSize))
+            return;
+
+        Vector2 textPos = new(
+            min.X + (max.X - min.X - textSize.X) / 2f,
+            min.Y + (max.Y - min.Y - textSize.Y) / 2f);
+
+        drawList.AddText(ImGui.GetFont(), fontSize, textPos + new Vector2(1), ImGui.GetColorU32(new Vector4(0, 0, 0, 1)), noteLabel);
+        drawList.AddText(ImGui.GetFont(), fontSize, textPos, ImGui.GetColorU32(Vector4.One), noteLabel);
+    }
+
+    private static bool TryGetFittedTextSize(string text, float maxWidth, float maxHeight, out float fontSize, out Vector2 textSize)
+    {
+        const float minFontSize = 6f;
+        float baseFontSize = ImGui.GetFontSize();
+        Vector2 baseTextSize = ImGui.CalcTextSize(text);
+
+        if (baseTextSize.X <= 0f || baseTextSize.Y <= 0f || baseFontSize <= 0f)
+        {
+            fontSize = 0f;
+            textSize = Vector2.Zero;
+            return false;
+        }
+
+        float widthScale = maxWidth / baseTextSize.X;
+        float heightScale = maxHeight / baseTextSize.Y;
+        float scale = MathF.Min(1f, MathF.Min(widthScale, heightScale));
+
+        if (scale <= 0f)
+        {
+            fontSize = 0f;
+            textSize = Vector2.Zero;
+            return false;
+        }
+
+        fontSize = MathF.Max(minFontSize, baseFontSize * scale);
+        float realScale = fontSize / baseFontSize;
+        textSize = baseTextSize * realScale;
+
+        return true;
+    }
+
+    private static void ApplyMasterVolume(float volume)
+    {
+        CoreSettings.SetMasterVolume(volume);
+
+        if (CoreSettings.SoundEngine == SoundEngine.SoundFonts)
+        {
+            MidiPlayer.SoundFontEngine?.SetVolume(CoreSettings.MasterVolume);
+        }
+        else if (CoreSettings.SoundEngine == SoundEngine.Plugins)
+        {
+            VstPlayer.SetVolume(CoreSettings.MasterVolume);
+        }
+    }
+
+    private static void DrawMasterVolumeControl(float yOffset, string id)
+    {
+        ImGui.SetCursorScreenPos(new(ImGui.GetIO().DisplaySize.X - ImGuiUtils.FixedSize(new Vector2(220)).X, CanvasPos.Y + ImGuiUtils.FixedSize(new Vector2(yOffset)).Y));
+        ImGui.PushItemWidth(ImGuiUtils.FixedSize(new Vector2(220)).X);
+
+        float volumePercent = CoreSettings.MasterVolume * 100f;
+        if (ImGui.SliderFloat($"##MasterVolume{id}", ref volumePercent, 0f, 1000f, "Volume %.0f%%", ImGuiSliderFlags.AlwaysClamp))
+        {
+            ApplyMasterVolume(volumePercent / 100f);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Volume master. Acima de 100 pode distorcer.");
+        }
+
+        ImGui.PopItemWidth();
+    }
+
     private static void DrawInputNotes()
     {
         var speed = 100f * ImGui.GetIO().DeltaTime * FallSpeedVal;
@@ -156,6 +239,12 @@ public class ScreenCanvas
                 drawList.AddRectFilled(new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4, py1),
                   new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4, py2),
                   ImGui.GetColorU32(ThemeManager.RightHandCol * 0.7f), CoreSettings.NoteRoundness, ImDrawFlags.RoundCornersAll);
+
+                DrawNoteLabel(
+                    drawList,
+                    new Vector2(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4, py1),
+                    new Vector2(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4, py2),
+                    note.KeyNum);
             }
             else
             {
@@ -192,6 +281,12 @@ public class ScreenCanvas
                 drawList.AddRectFilled(new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width, py1),
                     new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width, py2),
                     ImGui.GetColorU32(ThemeManager.RightHandCol), CoreSettings.NoteRoundness, ImDrawFlags.RoundCornersAll);
+
+                DrawNoteLabel(
+                    drawList,
+                    new Vector2(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width, py1),
+                    new Vector2(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault((SevenBitNumber)note.KeyNum, 0) * PianoRenderer.Width + PianoRenderer.Width, py2),
+                    note.KeyNum);
             }
             index++;
         }
@@ -430,22 +525,11 @@ public class ScreenCanvas
                 drawList.AddRectFilled(new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4, py1),
                       new(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4, py2),
                       GetSharpColor(index), CoreSettings.NoteRoundness, ImDrawFlags.RoundCornersAll);
-
-                if (ShowTextNotes)
-                {
-                    ImGui.PushFont(FontController.Font16_Icon12);
-                    string noteInfo = Drawings.GetNoteTextAs(TextType, note);
-                    
-                    if (TextType == TextTypes.NoteName)
-                        noteInfo = noteInfo.Replace("Sharp", "#");
-                    var textSize = ImGui.CalcTextSize(noteInfo) / 2;
-                    var pos = new Vector2(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width - textSize.X + 1,
-                        py2 - length * 100 / 2 - textSize.Y);
-
-                    drawList.AddText(pos + new Vector2(1), ImGui.GetColorU32(new Vector4(0, 0, 0, 1)), noteInfo);
-                    drawList.AddText(pos, ImGui.GetColorU32(Vector4.One), noteInfo);
-                    ImGui.PopFont();
-                }
+                DrawNoteLabel(
+                    drawList,
+                    new Vector2(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 3 / 4, py1),
+                    new Vector2(PianoRenderer.P.X + PianoRenderer.BlackNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width * 5 / 4, py2),
+                    note.NoteNumber);
             }
             else
             {
@@ -482,17 +566,11 @@ public class ScreenCanvas
                 drawList.AddRectFilled(new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width, py1),
                     new(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width, py2),
                     ImGui.GetColorU32(col), CoreSettings.NoteRoundness, ImDrawFlags.RoundCornersAll);
-
-                if (ShowTextNotes)
-                {
-                    ImGui.PushFont(FontController.Font16_Icon12);
-                    string noteInfo = Drawings.GetNoteTextAs(TextType, note);
-                    var pos = new Vector2(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width / 2 - ImGui.CalcTextSize(noteInfo).X / 2,
-                        py2 - length * 100 / 2 - ImGui.CalcTextSize(noteInfo).Y / 2);
-                    drawList.AddText(pos + new Vector2(1), ImGui.GetColorU32(new Vector4(0, 0, 0, 1)), noteInfo);
-                    drawList.AddText(pos, ImGui.GetColorU32(Vector4.One), noteInfo);
-                    ImGui.PopFont();
-                }
+                DrawNoteLabel(
+                    drawList,
+                    new Vector2(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width, py1),
+                    new Vector2(PianoRenderer.P.X + PianoRenderer.WhiteNoteToKey.GetValueOrDefault(note.NoteNumber, 0) * PianoRenderer.Width + PianoRenderer.Width, py2),
+                    note.NoteNumber);
             }
             index++;
         }
@@ -914,6 +992,12 @@ public class ScreenCanvas
             }
             else
                 _comboPlaybackSpeed = false;
+
+            DrawMasterVolumeControl(205, "Playback");
+        }
+        else
+        {
+            DrawMasterVolumeControl(110, "PlaybackLearning");
         }
     }
 
@@ -1174,12 +1258,10 @@ public class ScreenCanvas
                 var recordedMidi = MidiRecording.GetRecordedMidi();
                 if (recordedMidi != null)
                 {
-                    LeftRightData.S_IsRightNote.Clear();
-                    foreach (var n in recordedMidi.GetNotes())
-                    {
-                        LeftRightData.S_IsRightNote.Add(true);
-                    }
                     MidiFileHandler.LoadMidiFile(recordedMidi);
+                    LeftRightData.S_IsRightNote = Enumerable.Repeat(true, MidiFileData.Notes.Count()).ToList();
+                    MidiEditing.AutoAssignHands();
+                    MidiEditing.RebuildNoteIndexMap();
                     WindowsManager.SetWindow(Enums.Windows.MidiPlayback);
                 }
             }
@@ -1198,6 +1280,8 @@ public class ScreenCanvas
                 }
                 ImGui.EndCombo();
             }
+
+            DrawMasterVolumeControl(155, "PlayMode");
 
             var fullScreenIcon = Program._window.WindowState == WindowState.BorderlessFullScreen ? FontAwesome6.Minimize : FontAwesome6.Expand;
 

@@ -105,31 +105,14 @@ public class ModeSelectionWindow : ImGuiWindow
     {
         ScreenCanvasControls.SetLearningMode(learningMode);
         ScreenCanvasControls.SetEditMode(editMode);
-        
-        LeftRightData.S_IsRightNote.Clear();
-        foreach (var note in MidiFileData.Notes)
+
+        LeftRightData.S_IsRightNote = Enumerable.Repeat(true, MidiFileData.Notes.Count()).ToList();
+        if (!MidiEditing.ReadData())
         {
-            LeftRightData.S_IsRightNote.Add(true);
+            MidiEditing.AutoAssignHands();
         }
-        MidiEditing.ReadData();
 
-        // Map each note (possibly multiple at the same time/number) to its indices in the MIDI file
-        LeftRightData.S_NoteIndexMap = new Dictionary<string, List<int>>();
-
-        foreach (var (note, i) in MidiFileData.Notes.Select((note, i) => (note, i)))
-        {
-            // Build a stable composite key
-            var key = $"{note.NoteNumber}_{note.Time}";
-
-            // Create or append to the list
-            if (!LeftRightData.S_NoteIndexMap.TryGetValue(key, out var indexList))
-            {
-                indexList = new List<int>();
-                LeftRightData.S_NoteIndexMap[key] = indexList;
-            }
-
-            indexList.Add(i);
-        }
+        MidiEditing.RebuildNoteIndexMap();
 
         WindowsManager.SetWindow(Enums.Windows.MidiPlayback);
     }

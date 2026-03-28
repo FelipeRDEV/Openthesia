@@ -34,6 +34,7 @@ public class SettingsData
 
     public SoundEngine SoundEngine;
     public int WaveOutLatency;
+    public float MasterVolume = 1f;
     public AudioDriverTypes AudioDriverType;
     public string SelectedAsioDriverName;
     public bool OpenPluginAtStart;

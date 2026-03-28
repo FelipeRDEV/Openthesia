@@ -32,6 +32,9 @@ public static class CoreSettings
     private static int _waveOutLatency = 75;
     public static ref int WaveOutLatency => ref _waveOutLatency;
 
+    private static float _masterVolume = 1f;
+    public static ref float MasterVolume => ref _masterVolume;
+
     private static SoundEngine _soundEngine = SoundEngine.None;
     public static ref SoundEngine SoundEngine => ref _soundEngine;
 
@@ -103,6 +106,11 @@ public static class CoreSettings
     public static void SetSoundFontLatency(int value)
     {
         _waveOutLatency = value;
+    }
+
+    public static void SetMasterVolume(float value)
+    {
+        _masterVolume = Math.Clamp(value, 0f, 10f);
     }
 
     public static void SetSoundEngine(SoundEngine soundEngine)

@@ -115,6 +115,7 @@ public static class ProgramData
                 ScreenCanvasControls.SetTextType(storedSettings.TextType);
                 CoreSettings.SetSoundEngine(storedSettings.SoundEngine);
                 CoreSettings.SetSoundFontLatency(storedSettings.WaveOutLatency < 15 ? CoreSettings.WaveOutLatency : storedSettings.WaveOutLatency);
+                CoreSettings.SetMasterVolume(storedSettings.MasterVolume);
                 AudioDriverManager.SetAudioDriverType(storedSettings.AudioDriverType);
                 AudioDriverManager.SetAsioDriverDevice(storedSettings.SelectedAsioDriverName);
                 CoreSettings.SetVideoRecDestFolder(string.IsNullOrEmpty(storedSettings.VideoRecDestFolder)
@@ -186,6 +187,7 @@ public static class ProgramData
             TextType = ScreenCanvasControls.TextType,
             SoundEngine = CoreSettings.SoundEngine,
             WaveOutLatency = CoreSettings.WaveOutLatency,
+            MasterVolume = CoreSettings.MasterVolume,
             AudioDriverType = AudioDriverManager.AudioDriverType,
             SelectedAsioDriverName = AudioDriverManager.SelectedAsioDriverName,
             VideoRecDestFolder = CoreSettings.VideoRecDestFolder,

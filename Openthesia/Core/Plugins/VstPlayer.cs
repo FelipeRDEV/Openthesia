@@ -1,21 +1,14 @@
-﻿using Melanchall.DryWetMidi.Multimedia;
-using NAudio.Mixer;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
-using Openthesia.Core.SoundFonts;
 using Openthesia.Enums;
 using Openthesia.Settings;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace Openthesia.Core.Plugins;
 
 public static class VstPlayer
 {
     private static MixingSampleProvider _mixingSampleProvider;
+    private static VolumeSampleProvider _volumeSampleProvider;
 
     private static WaveOutEvent _waveOut;
     public static WaveOutEvent WaveOut => _waveOut;
@@ -37,6 +30,11 @@ public static class VstPlayer
             ReadFully = true
         };
 
+        _volumeSampleProvider = new VolumeSampleProvider(_mixingSampleProvider)
+        {
+            Volume = CoreSettings.MasterVolume
+        };
+
         PluginsChain = new PluginsChain(mixer);
         _mixingSampleProvider.AddMixerInput(PluginsChain);
 
@@ -47,7 +45,7 @@ public static class VstPlayer
 
             _waveOut = new WaveOutEvent();
             _waveOut.DesiredLatency = CoreSettings.WaveOutLatency;
-            _waveOut.Init(_mixingSampleProvider);
+            _waveOut.Init(_volumeSampleProvider);
             _waveOut.Play();
         }
         else if (AudioDriverManager.AudioDriverType == AudioDriverTypes.ASIO)
@@ -56,7 +54,7 @@ public static class VstPlayer
             _waveOut?.Dispose();
 
             _asioOut = new AsioOut(AudioDriverManager.SelectedAsioDriverName);
-            _asioOut.Init(_mixingSampleProvider);
+            _asioOut.Init(_volumeSampleProvider);
             _asioOut.Play();
         }
     }
@@ -70,7 +68,15 @@ public static class VstPlayer
         }
 
         _waveOut.DesiredLatency = newLatency;
-        _waveOut.Init(_mixingSampleProvider);
+        _waveOut.Init(_volumeSampleProvider);
         _waveOut.Play();
+    }
+
+    public static void SetVolume(float volume)
+    {
+        if (_volumeSampleProvider != null)
+        {
+            _volumeSampleProvider.Volume = Math.Clamp(volume, 0f, 10f);
+        }
     }
 }
