@@ -80,10 +80,13 @@ public class MidiBrowserWindow : ImGuiWindow
                             if (ImGui.Selectable(Path.GetFileName(file)))
                             {
                                 MidiFileHandler.LoadMidiFile(file);
-                                // we start and stop the playback so we can change the time before playing the song,
-                                // else falling notes and keypresses are mismatched
-                                MidiPlayer.Playback.Start();
+                                // Keep timeline aligned without emitting any note before mode selection.
                                 MidiPlayer.Playback.Stop();
+                                MidiPlayer.Playback.MoveToStart();
+                                MidiPlayer.SoundFontEngine?.StopAllNote(0);
+                                MidiPlayer.IsTimerRunning = false;
+                                MidiPlayer.Seconds = 0f;
+                                MidiPlayer.Timer = 0f;
                                 WindowsManager.SetWindow(Enums.Windows.ModeSelection);
                             }
                         }
@@ -121,10 +124,13 @@ public class MidiBrowserWindow : ImGuiWindow
             {
                 if (MidiFileHandler.OpenMidiDialog())
                 {
-                    /* we start and stop the playback so we can change the time before playing the song,
-                      else falling notes and keypresses are mismatched */
-                    MidiPlayer.Playback.Start();
+                    /* Keep timeline aligned without emitting any note before mode selection. */
                     MidiPlayer.Playback.Stop();
+                    MidiPlayer.Playback.MoveToStart();
+                    MidiPlayer.SoundFontEngine?.StopAllNote(0);
+                    MidiPlayer.IsTimerRunning = false;
+                    MidiPlayer.Seconds = 0f;
+                    MidiPlayer.Timer = 0f;
                     WindowsManager.SetWindow(Enums.Windows.ModeSelection);
                 }
             }

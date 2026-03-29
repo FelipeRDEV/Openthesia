@@ -53,6 +53,7 @@ public class ScreenCanvas
     private static bool _hasResumeAnchor;
     private static float _resumeAnchorSeconds;
     private static bool _preRollScrollVisual;
+    private static bool _learningPausedByMissingNote;
 
     private struct HitLineGlowState
     {
@@ -169,6 +170,7 @@ public class ScreenCanvas
         _preRollRemaining = PreRollSeconds;
         _isPreRollActive = true;
         _preRollScrollVisual = !_hasResumeAnchor;
+        _learningPausedByMissingNote = false;
         MidiPlayer.IsTimerRunning = false;
         MidiPlayer.Playback.Stop();
         MidiPlayer.SoundFontEngine?.StopAllNote(0);
@@ -226,6 +228,7 @@ public class ScreenCanvas
         MidiPlayer.Timer = pauseSeconds * 100f * FallSpeedVal;
         _resumeAnchorSeconds = pauseSeconds;
         _hasResumeAnchor = true;
+        _learningPausedByMissingNote = false;
     }
 
     private static void StartPlaybackAfterPreRoll()
@@ -234,12 +237,20 @@ public class ScreenCanvas
             return;
 
         long microseconds = (long)(_preRollBaseSeconds * 1_000_000f);
-        MidiPlayer.Playback.MoveToTime(new MetricTimeSpan(microseconds));
         MidiPlayer.Seconds = _preRollBaseSeconds;
         MidiPlayer.Timer = _preRollBaseSeconds * 100f * FallSpeedVal;
-        MidiPlayer.Playback.Start();
+        if (IsLearningMode)
+        {
+            MidiPlayer.Playback.Stop();
+        }
+        else
+        {
+            MidiPlayer.Playback.MoveToTime(new MetricTimeSpan(microseconds));
+            MidiPlayer.Playback.Start();
+        }
         MidiPlayer.StartTimer();
         _hasResumeAnchor = false;
+        _learningPausedByMissingNote = false;
         CancelPreRoll();
     }
 
@@ -295,6 +306,7 @@ public class ScreenCanvas
         _queueInitialPreRoll = true;
         _hasResumeAnchor = false;
         _resumeAnchorSeconds = 0f;
+        _learningPausedByMissingNote = false;
     }
     
     private static bool IsNoteEnabled(int index) => true;
@@ -970,6 +982,22 @@ public class ScreenCanvas
         if (MidiPlayer.IsTimerRunning && !_isPreRollActive)
         {
             MidiPlayer.Timer += ImGui.GetIO().DeltaTime * 100f * (float)MidiPlayer.Playback.Speed * FallSpeedVal;
+            if (IsLearningMode && FallSpeedVal > 0f)
+            {
+                float durationSeconds = (float)MidiFileData.MidiFile.GetDuration<MetricTimeSpan>().TotalSeconds;
+                float timelineSeconds = MidiPlayer.Timer / (100f * FallSpeedVal);
+                if (!float.IsFinite(timelineSeconds))
+                    timelineSeconds = MidiPlayer.Seconds;
+
+                timelineSeconds = Math.Clamp(timelineSeconds, 0f, durationSeconds);
+                MidiPlayer.Seconds = timelineSeconds;
+
+                if (timelineSeconds >= durationSeconds)
+                {
+                    MidiPlayer.StopTimer();
+                    MidiPlayer.Playback.Stop();
+                }
+            }
         }
 
         int index = 0;
@@ -1014,13 +1042,19 @@ public class ScreenCanvas
 
                 if (IsLearningMode)
                 {
-                    if (py2 > PianoRenderer.P.Y - 1.5f && py2 < PianoRenderer.P.Y)
+                    float hitLineStep = MathF.Abs(ImGui.GetIO().DeltaTime * 100f * (float)MidiPlayer.Playback.Speed * FallSpeedVal);
+                    float hitLineWindow = MathF.Max(1.5f, hitLineStep + 1f);
+                    if (py2 >= PianoRenderer.P.Y - hitLineWindow && py2 <= PianoRenderer.P.Y + hitLineWindow)
                     {
                         if (IsNoteEnabled(index) && !IOHandle.PressedKeys.Contains(note.NoteNumber))
                         {
                             missingNote = true;
-                            MidiPlayer.StopTimer();
-                            MidiPlayer.Playback.Stop();
+                            if (!_learningPausedByMissingNote)
+                            {
+                                MidiPlayer.StopTimer();
+                                MidiPlayer.Playback.Stop();
+                                _learningPausedByMissingNote = true;
+                            }
 
                             if (note.NoteName.ToString().EndsWith("Sharp"))
                             {
@@ -1275,10 +1309,11 @@ public class ScreenCanvas
         DrawChordGuideLines(drawList, chordGuideMarkers);
         DrawHitLineTransientEffects(drawList);
 
-        if (IsLearningMode && !MidiPlayer.IsTimerRunning && !missingNote)
+        if (IsLearningMode && _learningPausedByMissingNote && !MidiPlayer.IsTimerRunning && !missingNote)
         {
             if (!_isPreRollActive)
-                BeginPreRoll();
+                MidiPlayer.StartTimer();
+            _learningPausedByMissingNote = false;
         }
     }
 
@@ -1430,6 +1465,7 @@ public class ScreenCanvas
                 _queueInitialPreRoll = false;
                 MidiPlayer.Seconds = 0f;
                 MidiPlayer.Timer = 0f;
+                _learningPausedByMissingNote = false;
                 BeginPreRoll();
             }
 
